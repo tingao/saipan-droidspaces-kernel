@@ -1,0 +1,14 @@
+[Unit]
+Description=Forward new SMS from the handset to Telegram
+Documentation=file:/usr/local/sbin/sms-telegram-send.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sms-telegram-send.sh
+# The script exits non-zero on a delivery failure so the journal shows it and the
+# next timer tick retries; that is not a reason for systemd to give up on the unit.
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal

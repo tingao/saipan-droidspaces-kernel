@@ -1,0 +1,6 @@
+id=sms-telegram
+name=saipan SMS to Telegram
+version=v1.0
+versionCode=1
+author=tingao
+description=Forwards every SMS the handset receives to a Telegram bot. Copies the SMS database into the container's spool when it changes; the container reads it with sqlite3 and posts with curl.

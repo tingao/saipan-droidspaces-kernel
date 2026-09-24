@@ -11,6 +11,7 @@ does not get you there.
 | `verify-tuning.sh` | prints the current state of all of the above, so you can check rather than assume |
 | `container-no-suspend.sh` | run **inside the container**: stops it from being able to suspend the phone |
 | `debloat-apply.sh` + `debloat-list.txt` | reversible debloat for a headless device: 111 Motorola, carrier, Google and AOSP packages, with the keep-list written down and every action logged to a rollback script |
+| `sms-telegram/` | every SMS the handset receives, forwarded to a Telegram bot. A KernelSU module on the phone plus a systemd timer in the container |
 
 Battery charging itself is not in this directory - it is **ACC** (Advanced Charging Controller), a
 separate KernelSU module, because that is what the other two phone servers in this estate use.
@@ -265,3 +266,63 @@ unlocked bootloader with a custom kernel is how this device gets bricked.
 * No GPU settings. I never tested GPU access from inside the container on this phone.
 * Nothing about the modem beyond the airplane-mode policy above - I have not measured what the
   radio draws when idle.
+
+## SMS to Telegram
+
+Every SMS the handset receives is posted to a Telegram bot. There are **two
+independent implementations**, and only one should be enabled at a time or every
+message arrives twice.
+
+### The script (`sms-telegram/`)
+
+Split across the two sides, because each has something the other lacks:
+
+| where | what | why there |
+|---|---|---|
+| phone, KernelSU module | copies `mmssms.db` into the container's spool whenever it changes | the container cannot see `/data/data` |
+| container, systemd timer | reads the copy with `sqlite3` and posts with `curl` | the phone's only HTTP client is busybox `wget`, which prints *"TLS certificate validation not implemented"* |
+
+Two decisions worth recording:
+
+* **The database, not `content query`.** A message body can contain newlines,
+  commas, quotes, tabs and anything else, and `content query` prints rows as
+  `Row: N column=value` with the value pasted in raw. Parsing that from mksh is a
+  losing game. The container reads the SQLite file directly, so a body is never
+  parsed at all.
+* **The database is copied into the container's own rootfs**, which is a directory
+  on `/data`. That needs no bind mount and no container restart. The copy is
+  written as `.part` and renamed, so the container never opens a half-written file.
+
+State lives in `/var/lib/sms-telegram/last_id`, a high-water mark on the message
+`_id`. Two edge cases it handles, both of which it got wrong first:
+
+* **An empty inbox has `max(_id) = 0`.** Testing `last = 0` to mean "first run"
+  meant every pass looked like a first run and the mark never settled. The test is
+  the state file's existence.
+* **`_id` can go backwards.** A factory reset or a restore-from-backup restarts it
+  at 1, and a stale high-water mark would then compare every new message as
+  already seen and skip it forever. If the snapshot's maximum is *below* the mark,
+  the mark is reset.
+
+Delivery failures do not advance the mark, so a message that fails to send is
+retried on the next pass rather than lost.
+
+### The app (SmsForwarder)
+
+Installed as `cn.ppps.forwarder` and configured with a Telegram Bot sender plus an
+SMS rule. It is the more battle-tested of the two, so it is the one enabled; the
+script sits ready as the backup.
+
+Configuring it needed two things that are worth knowing:
+
+* **`sender_list` can never be empty.** `ConvertersSenderList.stringToObject()` does
+  `value.split(",").map { it.trim().toLong() }`, and `"".split(",")` is `[""]`, so an
+  empty string throws `NumberFormatException` and the Rules screen crashes. The
+  column is `NOT NULL` too, so NULL is not an option either - it must contain at
+  least one sender id.
+* **The sender dropdown renders in a separate `PopupWindow`**, which `uiautomator
+  dump` does not capture, so it cannot be driven by scripted taps. The sender row
+  was created through the app's own form; the rule row was written directly into
+  the SQLite database in the shape the app's schema expects.
+
+Credit where it is due: [pppscn/SmsForwarder](https://github.com/pppscn/SmsForwarder).

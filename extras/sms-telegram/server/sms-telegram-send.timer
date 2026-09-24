@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for new SMS to forward, every 30 seconds
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=30s
+AccuracySec=5s
+# If the phone was off or the container was down, do not try to catch up on every
+# missed tick - one pass reads whatever is new in the snapshot.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
