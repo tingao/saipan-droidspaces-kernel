@@ -28,3 +28,30 @@ allow vendor_init sysfs_devices_system_cpu file { open read write getattr }
 # --- thermal zone readings (used by the watchdog to decide when to ease clocks off) ---
 allow ksu sysfs_therm file { open read getattr }
 allow ksu sysfs_therm dir { search read open getattr }
+
+# --- ACC (Advanced Charging Controller): the MTK charger control interface ---
+# ACC's charging switch on this device is /proc/mtk_battery_cmd/en_power_path
+# (label proc_battery_cmd). It is root-writable (0600) but denied to the KernelSU
+# su domain by policy, so ACC cannot pause charging without this.
+# Verified: echo 0 flips current_now from +503 mA to -127 mA, echo 1 restores it.
+# NOTE the bare value - "0 0" and "1 0" are silently ignored by this driver.
+allow ksu proc_battery_cmd file { open read write getattr }
+allow ksu proc_battery_cmd dir { search read open getattr }
+allow init proc_battery_cmd file { open read write getattr }
+allow init proc_battery_cmd dir { search read open getattr }
+allow vendor_init proc_battery_cmd file { open read write getattr }
+allow vendor_init proc_battery_cmd dir { search read open getattr }
+allow droidspacesd proc_battery_cmd file { open read write getattr }
+allow droidspacesd proc_battery_cmd dir { search read open getattr }
+
+# power_supply status / charge_type nodes ACC reads and uses for its workarounds
+allow ksu sysfs_batteryinfo file { open read write getattr }
+allow ksu sysfs_batteryinfo dir { search read open getattr }
+allow init sysfs_batteryinfo file { open read write getattr }
+allow init sysfs_batteryinfo dir { search read open getattr }
+allow droidspacesd sysfs_batteryinfo file { open read write getattr }
+allow droidspacesd sysfs_batteryinfo dir { search read open getattr }
+
+# charging current / voltage limit nodes
+allow ksu sysfs file { open read write getattr }
+allow init sysfs file { open read write getattr }

@@ -80,6 +80,17 @@ settings put global stay_on_while_plugged_in 7 2>/dev/null
 settings put system screen_off_timeout 2147483647 2>/dev/null
 log "android: stay_on_while_plugged_in=$(settings get global stay_on_while_plugged_in 2>/dev/null)"
 
+# ---------------------------------------------------------------- airplane mode
+# No SIM -> airplane mode on, so the idle modem stops costing power. SIM -> off.
+# The decision comes from the handset's own SIM state; see airplane-mode.sh.
+case "${AIRPLANE_POLICY:-auto}" in
+  always) AP=on ;;
+  never)  AP=off ;;
+  *)      AP=auto ;;
+esac
+if [ -x "$MODDIR/airplane-mode.sh" ]; then
+  "$MODDIR/airplane-mode.sh" "$AP" >> "$LOG" 2>&1
+fi
 # ---------------------------------------------------------------- watchdog
 if [ -x "$MODDIR/watchdog.sh" ]; then
   # kill any previous instance, then detach a fresh one

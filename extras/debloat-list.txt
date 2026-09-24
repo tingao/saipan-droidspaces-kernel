@@ -1,0 +1,198 @@
+# moto g(50) 5G (saipan / XT2149-1, stock Android 12, KernelSU-Next) - headless
+# server debloat list.
+#
+# One package per line; blank lines and # comments are ignored.
+# Applied with `pm disable-user --user 0` - reversible, and it leaves the APK on the
+# system partition, so a mistake cannot leave the handset without something it needs
+# to boot. See debloat-apply.sh.
+#
+# ---------------------------------------------------------------------------
+# DELIBERATELY KEPT, because breaking them means a phone nobody can hold:
+#
+#   com.motorola.launcher3, com.motorola.launcherconfig        the home screen
+#   com.motorola.settings, com.android.settings                Settings
+#   com.motorola.systemserver, com.motorola.android.providers.settings
+#   com.motorola.motofpstouch, com.motorola.faceunlock         biometrics - the
+#       touchscreen is what unlocks this phone and it has failed before; do not
+#       take away the fallback paths
+#   com.motorola.thermalservice, com.motorola.sarcontrol       thermal and radio
+#       safety. Not bloat, however much they look like it
+#   com.motorola.motocit, com.motorola.hiddenmenuapp           the hardware test
+#       and diagnostics apps. The first thing you want when a sensor dies
+#   com.motorola.telprov, com.motorola.msimsettings, com.motorola.rcsConfigService,
+#   com.motorola.nfc, com.android.stk, com.android.cellbroadcast*,
+#   com.android.phone, com.android.providers.telephony          telephony. There
+#       IS a SIM in this handset
+#   com.motorola.motosignature.app, com.motorola.motosignature2.app
+#   com.trustonic.teeservice                                   device integrity
+#   com.motorola.imagertuning_V2, com.motorola.android.*.overlay.*,
+#   com.android.internal.display.cutout.*, com.android.internal.systemui.navbar.*
+#       RRO overlays. Small, and load-bearing for the UI in ways that are not
+#       obvious until they are gone
+#   com.droidspaces.app, com.rifsxd.ksunext                    the reason this
+#       phone is a server
+#   com.google.android.gms, com.google.android.gsf, com.android.vending (Play),
+#   com.google.android.webview, com.google.android.inputmethod.latin (keyboard),
+#   com.google.android.setupwizard
+#       GMS/GSF are kept because Play needs them and the framework is happier with
+#       them present. Their background network is restricted instead of disabled,
+#       in debloat-apply.sh
+#
+# KEPT as "basic stuff", per the owner's instruction:
+#   com.google.android.calculator, com.google.android.deskclock,
+#   com.google.android.dialer, com.google.android.contacts,
+#   com.google.android.calendar, com.google.android.apps.messaging,
+#   com.google.android.apps.nbu.files, com.google.android.tts,
+#   com.google.android.syncadapters.contacts
+# ---------------------------------------------------------------------------
+
+# --- Motorola: updaters, telemetry, carrier and consumer extras ---------------
+# The two OTA packages matter most: an over-the-air update on an unlocked
+# bootloader with a custom kernel is how you lose the device.
+com.motorola.ccc.devicemanagement
+com.motorola.ccc.mainplm
+com.motorola.ccc.notification
+com.motorola.android.nativedropboxagent
+com.motorola.bach.modemstats
+com.motorola.lifetimedata
+com.motorola.wifi.motowifimetrics
+com.motorola.bug2go
+com.motorola.motocare
+com.motorola.appforecast
+com.motorola.help
+com.motorola.help.extlog
+com.motorola.demo
+com.motorola.mototour
+com.motorola.omadm.service
+com.motorola.omadm.vzw
+com.motorola.enterprise.service
+
+# --- Motorola: apps -----------------------------------------------------------------
+com.motorola.moto
+com.motorola.actions
+com.motorola.actions.overlay
+com.motorola.aiservices
+com.motorola.motointelligence
+com.motorola.motointelligence.overlay
+com.motorola.genie
+com.motorola.gesture
+com.motorola.gamemode
+com.motorola.personalize
+com.motorola.discovery
+com.motorola.dynamicvolume
+com.motorola.easyprefix
+com.motorola.motodisplay
+com.motorola.timeweatherwidget
+com.motorola.livewallpaper3
+com.motorola.android.providers.chromehomepage
+com.motorola.camera3
+com.motorola.camera3.content.ai
+com.motorola.motcameradesktop
+com.motorola.mobiledesktop.core
+com.motorola.systemui.desk
+com.motorola.photoeditor
+com.motorola.screenshoteditor
+
+# --- Motorola: carrier-specific ------------------------------------------------------
+com.motorola.att.phone.extensions
+com.motorola.attvowifi
+com.motorola.carriersettingsext
+com.motorola.coresettingsext
+com.motorola.entitlement
+com.motorola.callredirectionservice
+com.motorola.appdirectedsmsproxy
+com.motorola.invisiblenet
+com.motorola.nfwlocationattribution
+com.motorola.contacts.preloadcontacts
+com.motorola.contacts.preloadcontacts.overlay.vzw
+com.motorola.android.jvtcmd
+com.motorola.vzw.pco.extensions.pcoreceiver
+com.motorola.android.overlay.payjoy
+com.payjoy.access
+android.autoinstalls.config.motorola.layout
+
+# --- Other OEM preloads --------------------------------------------------------------
+com.amazon.appmanager
+com.facebook.appmanager
+com.facebook.services
+com.facebook.system
+com.att.iqi
+com.lenovo.lsf.user
+
+# --- Google: everything except Play and what Play needs ------------------------------
+com.google.android.apps.docs
+com.google.android.apps.googleassistant
+com.google.android.apps.maps
+com.google.android.apps.photos
+com.google.android.apps.restore
+com.google.android.apps.subscriptions.red
+com.google.android.apps.tachyon
+com.google.android.apps.turbo
+com.google.android.apps.wallpaper
+com.google.android.apps.wellbeing
+com.google.android.apps.youtube.music
+com.google.android.apps.youtube.music.setupwizard
+com.google.android.apps.carrier.carrierwifi
+com.google.android.as
+com.google.android.as.oss
+com.google.android.videos
+com.google.android.youtube
+com.google.android.gm
+com.google.android.googlequicksearchbox
+com.google.android.projection.gearhead
+com.google.android.gms.location.history
+com.google.android.feedback
+com.google.android.partnersetup
+com.google.android.printservice.recommendation
+com.google.android.marvin.talkback
+com.google.ar.core
+com.google.mainline.telemetry
+
+# --- AOSP extras that a server does not need -----------------------------------------
+com.android.chrome
+com.android.bookmarkprovider
+com.android.providers.partnerbookmarks
+com.android.wallpaper.livepicker
+com.android.egg
+com.android.dreams.basic
+com.android.traceur
+com.android.printspooler
+com.android.bips
+com.android.hotwordenrollment.okgoogle
+com.android.hotwordenrollment.xgoogle
+
+# --- cosmetic theme packages (fonts/icons) -------------------------------------------
+com.android.theme.font.ArchivoSemiBold
+com.android.theme.font.Exo2Regular
+com.android.theme.font.notoserifsource
+com.android.theme.font.RobotoSlabRegular
+com.android.theme.icon.pebble
+com.android.theme.icon.round
+com.android.theme.icon.roundedrect
+com.android.theme.icon.taperedrect
+com.android.theme.icon.teardrop
+com.android.theme.icon.vessel
+
+# ---------------------------------------------------------------------------
+# NOT in the list above, because this ROM refuses to disable them:
+#
+#   com.motorola.android.fota    Motorola's FOTA updater
+#   com.motorola.ccc.ota         Motorola CCC over-the-air updater
+#   com.motorola.paks
+#   com.motorola.fmplayer
+#   com.motorola.android.fmradio
+#
+# `pm disable-user --user 0` fails with "Failure: package is non-disable",
+# `pm uninstall --user 0` fails the same way, `com.motorola.paks` reports
+# "package is protected", and `pm hide` reports "new hidden state: false" and
+# does not stick. Motorola has marked them non-disableable in the framework, so
+# they cannot be removed from here.
+#
+# What debloat-apply.sh does instead: strips their background execution via
+# appops and force-stops them. That is the part that actually costs anything on a
+# headless device, and it is reversible.
+#
+# The OTA updaters are the ones that matter. An over-the-air update on an
+# unlocked bootloader with a custom kernel is how this device gets bricked, so
+# they are worth the extra handling even though the package itself stays.
+# ---------------------------------------------------------------------------

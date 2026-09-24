@@ -112,6 +112,17 @@ while true; do
     log "android: screen_off_timeout re-asserted"
   fi
 
+  # ---- airplane mode / SIM policy ---------------------------------------
+  # Cheap: two property reads a minute, and it only acts when the desired state
+  # differs from the current one, so it never flaps the radio.
+  if [ -x "$MODDIR/airplane-mode.sh" ]; then
+    case "$AIRPLANE_POLICY" in
+      always) AP=on ;;
+      never)  AP=off ;;
+      *)      AP=auto ;;
+    esac
+    "$MODDIR/airplane-mode.sh" "$AP" >/dev/null 2>&1
+  fi
   # ---- wifi watchdog ----------------------------------------------------
   if [ "$WIFI_WATCHDOG" = "1" ]; then
     wifi_on=$(settings get global wifi_on 2>/dev/null)

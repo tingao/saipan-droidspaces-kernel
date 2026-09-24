@@ -128,14 +128,18 @@ The MT6833 cpufreq driver carries three OPP tables and picks one from an efuse s
 so the 2.4 GHz table is present in the source even on parts binned for 2.2 GHz. I made the
 choice switchable from the boot image cmdline and then measured all three.
 
-| segment | big cluster | sysbench, pinned to cpu6 | verdict |
-|---|---|---|---|
-| `FY` (stock) | 2,203,000 kHz | **529.2 events/s** | fastest measured - this handset's efuse value |
-| `B20G` | 2,000,000 kHz | 480.5 events/s (−9.2 %) | exactly 2000/2203; underclock works as expected |
-| `B24G` | 2,400,000 kHz | **288.2 events/s (−45 %)** | rejected - the driver reports 2.4 GHz under load, the silicon does not deliver it |
+| segment | driver reports | hardware PLL | Vproc | sysbench, pinned to cpu6 | verdict |
+|---|---|---|---|---|---|
+| `FY` (stock) | 2,203,000 kHz | 2,202,000 | 793,750 µV | **927.9 events/s** | this handset's efuse value |
+| `B20G` | 2,000,000 kHz | 1,999,000 | 750,000 µV | 841.2 events/s (−9.3 %) | exactly 2000/2203; the underclock works |
+| `B24G` | 2,400,000 kHz | **2,202,000** | 837,500 µV | 929.6 events/s (+0.2 %) | rejected - the PLL never leaves 2.2 GHz and the voltage goes up |
 
-So the handset stays on the stock segment, and I am not shipping an overclock. The measurements
-and what they rule out are in **[docs/CPU-CLOCK.md](docs/CPU-CLOCK.md)**.
+Under `B24G` the same driver reports two different things at once: 2.4 GHz through cpufreq, and
+2,202,000 kHz through its own DVFS interface, which is the one that reads the PLL. Throughput
+does not move. So the overclock is not a loss, it is **nothing** - paid for with 43.75 mV of
+extra core voltage. The handset stays on the stock segment. Full measurements, including a
+correction to a wrong figure I published first, are in
+**[docs/CPU-CLOCK.md](docs/CPU-CLOCK.md)**.
 
 ## Flashing
 
@@ -170,8 +174,13 @@ than they would on a desktop. `extras/` has the KernelSU module I use:
   driver's suspend path fails and the radio stops passing traffic, so anything reached over
   the network goes away until somebody touches the screen. The module holds a kernel wakeup
   source. [docs/KEEP-AWAKE.md](docs/KEEP-AWAKE.md).
-* **A charger left connected at 100 % is the fastest way to wear the cell.** The module keeps
-  the pack in a 75-80 % band through Motorola's own `qpnp_adaptive_charge` parameters.
+* **A charger left connected at 100 % is the fastest way to wear the cell.** Charging is held by
+  **ACC** (Advanced Charging Controller), the same KernelSU module my other two phone servers
+  run, driving the MTK charger interface directly; the module's `qpnp_adaptive_charge` band stays
+  underneath as a backstop if ACC ever stops.
+* **The radio is powered whether or not it is useful.** With no SIM fitted the module turns
+  airplane mode on and keeps Wi-Fi alive; with a SIM it leaves the radio alone. It reads the
+  handset's own SIM state rather than being told which phone it is.
 * **Android's power and thermal HALs rewrite these files underneath you.** Everything the
   module applies is re-asserted by a watchdog every 60 s, because a one-shot boot script
   does not stay applied on this device.
@@ -179,8 +188,8 @@ than they would on a desktop. `extras/` has the KernelSU module I use:
 ## Not included
 
 * Any kind of thermal or performance kernel tweak. `extras/` offers CPU ceilings and a
-  governor, and on this hardware those are the honest levers; the measured result of pushing
-  the big cluster beyond its bin is that throughput *falls*, so there is nothing to gain here.
+  governor, and on this hardware those are the honest levers; pushing the big cluster past its
+  bin changes nothing but the core voltage, so there is nothing to gain here.
 * A GPU story. I never tested GPU access from inside the container on this device.
 * GPU/vendor firmware of any kind, or Motorola's userspace.
 

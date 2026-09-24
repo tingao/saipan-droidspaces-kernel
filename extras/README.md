@@ -6,9 +6,15 @@ does not get you there.
 
 | item | what it does |
 |---|---|
-| `saipan-tuning/` | KernelSU module: battery charge band, keep-awake wakeup source, CPU ceilings, Wi-Fi watchdog |
+| `saipan-tuning/` | KernelSU module: battery charge band, keep-awake wakeup source, CPU ceilings, SIM-driven airplane mode, Wi-Fi watchdog |
+| `saipan-tuning/airplane-mode.sh` | the airplane-mode policy on its own: `auto\|on\|off\|status` |
 | `verify-tuning.sh` | prints the current state of all of the above, so you can check rather than assume |
 | `container-no-suspend.sh` | run **inside the container**: stops it from being able to suspend the phone |
+| `debloat-apply.sh` + `debloat-list.txt` | reversible debloat for a headless device: 111 Motorola, carrier, Google and AOSP packages, with the keep-list written down and every action logged to a rollback script |
+
+Battery charging itself is not in this directory - it is **ACC** (Advanced Charging Controller), a
+separate KernelSU module, because that is what the other two phone servers in this estate use.
+See [Battery: ACC](#battery-acc) below.
 
 ## Installing the KernelSU module
 
@@ -42,7 +48,7 @@ files underneath you, and a lock/suspend cycle can leave Wi-Fi switched off. A o
 script does not stay applied on this device - I have watched the charge band revert within
 minutes.
 
-### Battery charge band
+### Battery charge band (backstop only)
 
 ```
 /sys/module/qpnp_adaptive_charge/parameters/upper_limit   -> 80
@@ -50,8 +56,11 @@ minutes.
 /sys/module/qpnp_adaptive_charge/parameters/blocking      -> 1
 ```
 
-Leaving a phone permanently at 100 % on a charger is the fastest way to wear the cell. A 75-80 %
-band keeps it near the flat part of the Li-ion voltage curve.
+**This band does not normally do anything.** ACC holds the pack at 55-60 %, well below it. The
+qpnp band is set deliberately *above* ACC's so the two never fight, and it exists only as a
+backstop: if `accd` ever stops, the charger driver still stops the pack at 80 % instead of
+letting it run to 100 %. Remove it and the failure mode of a dead ACC daemon becomes a battery
+held at full charge on a permanent cable, which is the thing all of this is meant to avoid.
 
 **The write order matters and is not obvious.** Writing `upper_limit` resets `lower_limit` to
 `-1` in this driver, so the scripts always write upper first, then lower. Verified on-device:
@@ -101,6 +110,8 @@ cannot write to by default:
 |---|---|
 | `/sys/module/qpnp_adaptive_charge/parameters/{upper,lower}_limit` | `vendor_sysfs_battery_supply` |
 | `/sys/devices/system/cpu/cpu*/cpufreq/*` | `sysfs_devices_system_cpu` |
+| `/proc/mtk_battery_cmd/en_power_path` | `proc_battery_cmd` (ACC's charging switch) |
+| `/sys/class/power_supply/*/status`, `charge_type` | `sysfs_batteryinfo` |
 
 Reads worked; only writes were denied. `sepolicy.rule` grants write on exactly those two labels
 to `ksu`, `droidspacesd`, `init` and `vendor_init`, rather than allowing sysfs broadly or
@@ -121,10 +132,29 @@ and `settings put` fails silently - the boot log shows `stay_on_while_plugged_in
 after it. The watchdog re-asserts them once the framework is definitely running, so the value
 does not depend on catching the boot window.
 
+## Debloating
+
+`debloat-apply.sh debloat-list.txt`, as root on the device. It uses
+`pm disable-user --user 0`, which is reversible with one command per package, leaves the APK on
+the system partition so a mistake cannot leave the handset without something it needs to boot,
+and writes a rollback script before it changes anything.
+
+`debloat-list.txt` carries the **keep-list as well as the disable-list**, in the header, because
+that is the half that is easy to get wrong. The short version: launcher, Settings, biometrics
+(the touchscreen on this handset has failed before, so no fallback path gets removed), thermal
+and SAR services, the hardware test and diagnostic apps, telephony, RRO overlays, Droidspaces
+and KernelSU. Play, GMS and GSF are kept because Play needs them and the framework is happier
+with them present - their background execution is restricted instead of disabled.
+
+Five packages **cannot** be disabled on this ROM, including both Motorola OTA updaters:
+`pm disable-user` and `pm uninstall --user 0` both answer `Failure: package is non-disable`,
+`com.motorola.paks` answers `package is protected`, and `pm hide` reports `new hidden state:
+false` without sticking. For those the script strips background execution with appops and
+force-stops them. The OTA updaters are the ones that matter: an over-the-air update on an
+unlocked bootloader with a custom kernel is how this device gets bricked.
+
 ## What this does not do
 
-* No debloating. I did not disable any preinstalled app on this device and I am not shipping a
-  list I have not tested here.
 * No GPU settings. I never tested GPU access from inside the container on this phone.
-* Nothing about the modem. This handset has no SIM and I have not looked at whether the radio
-  is drawing anything worth recovering.
+* Nothing about the modem beyond the airplane-mode policy above - I have not measured what the
+  radio draws when idle.
