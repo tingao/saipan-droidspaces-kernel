@@ -235,3 +235,69 @@ su -c "/data/local/Droidspaces/bin/droidspaces --name=debian-moto enter"
   silently fail while the watchdog logs "re-asserted" every minute. Same section.
 * Reflash `releases/boot-saipan-ksu-level.img` to return to this kernel. Your stock `boot.img` goes
   back to stock; keep a MediaTek blankflash package for the case where fastboot is gone.
+
+---
+
+## 6. Access: the Cloudflare tunnel, and why the phone is reachable from anywhere
+
+The container runs `sshd` on **1304**, key-only, hardened by `container-baseline.sh`. That is
+reachable three ways:
+
+| route | address | when it works |
+|---|---|---|
+| tunnel | `ssh motog` / `ssh bagda` | anywhere, through Cloudflare |
+| LAN | `ssh motog-lan` | on the same Wi-Fi |
+| out-of-band | `su -c 'droidspaces --name=debian-moto run <cmd>'` | always, from a USB cable |
+
+### 6.1 The tunnel
+
+A **remotely-managed** Cloudflare tunnel named `saipan-motog`, with two published hostnames both
+pointing at the container's sshd:
+
+```
+motog-ssh.tingao.uk  ->  ssh://localhost:1304
+bagda-ssh.tingao.uk  ->  ssh://localhost:1304
+                     ->  http_status:404   (catch-all)
+```
+
+Both names are published because a tunnel hostname costs nothing and remembering one of two is
+easier than remembering which one it was. The catch-all matters: without a terminal rule,
+cloudflared refuses to serve anything at all.
+
+The connector lives **inside the container**, so `localhost:1304` is the container's own sshd and
+no port forward is involved. cloudflared comes from Cloudflare's apt repo and its token is kept in
+a 0600 `EnvironmentFile` rather than in the unit, because the unit is world-readable.
+
+Hardening on top: `StartLimitIntervalSec=0` so systemd never gives up on a flapping handset
+uplink, and a 60-second watchdog that restarts the connector when its own `/ready` endpoint stops
+answering - two consecutive failures, so an ordinary edge blip that cloudflared re-registers by
+itself is left alone.
+
+Verified: `status=healthy`, four QUIC connections (ams06, fra10, fra03, ams18), and `ssh motog` and
+`ssh bagda` both land in the container.
+
+### 6.2 The client side
+
+`~/.ssh/config` on the workstation:
+
+```
+Host motog bagda motog-ssh motog-ssh.tingao.uk
+  HostName motog-ssh.tingao.uk
+  User tingao
+  IdentityFile ~/.ssh/motog.key
+  ProxyCommand .../cloudflared.exe access ssh --hostname motog-ssh.tingao.uk
+```
+
+The second hostname is a separate block with the hostname written out, not `%h` - `%h` expands to
+whatever alias was typed, so `ssh bagda` would try to proxy to a hostname that does not exist.
+
+Neither hostname has a Cloudflare Access policy, the same as `tokyo-ssh`. Access does not buy much
+here anyway: the container's sshd is key-only, so a stolen hostname gets a login prompt and
+nothing else.
+
+### 6.3 The MOTD
+
+Every login renders the suite installed by `container-baseline.sh` - system and kernel,
+CPU/RAM/disk with the handset's battery on its own line, sshguard counters, listening ports,
+fastfetch and the container list. It is the fastest way to tell whether the phone is healthy
+without running anything.
