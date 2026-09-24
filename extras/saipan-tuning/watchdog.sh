@@ -113,15 +113,22 @@ while true; do
   fi
 
   # ---- airplane mode / SIM policy ---------------------------------------
-  # Cheap: two property reads a minute, and it only acts when the desired state
-  # differs from the current one, so it never flaps the radio.
+  # The watchdog ticks every 60 s and this runs on every pass by default, so a SIM
+  # inserted or removed is noticed within a minute - two, for removal, because the
+  # policy waits for a second ABSENT reading before cutting the radio. Set
+  # SIM_CHECK_EVERY in tuning.conf to slow that down; 1440 makes it a daily check.
   if [ -x "$MODDIR/airplane-mode.sh" ]; then
-    case "$AIRPLANE_POLICY" in
-      always) AP=on ;;
-      never)  AP=off ;;
-      *)      AP=auto ;;
-    esac
-    "$MODDIR/airplane-mode.sh" "$AP" >/dev/null 2>&1
+    SIM_CHECK_EVERY="${SIM_CHECK_EVERY:-1}"
+    case "$SIM_CHECK_EVERY" in ''|*[!0-9]*) SIM_CHECK_EVERY=1 ;; esac
+    [ "$SIM_CHECK_EVERY" -lt 1 ] && SIM_CHECK_EVERY=1
+    if [ $((n % SIM_CHECK_EVERY)) -eq 0 ]; then
+      case "$AIRPLANE_POLICY" in
+        always) AP=on ;;
+        never)  AP=off ;;
+        *)      AP=auto ;;
+      esac
+      "$MODDIR/airplane-mode.sh" "$AP" >/dev/null 2>&1
+    fi
   fi
   # ---- wifi watchdog ----------------------------------------------------
   if [ "$WIFI_WATCHDOG" = "1" ]; then
