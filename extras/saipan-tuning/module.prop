@@ -1,0 +1,6 @@
+id=saipan-tuning
+name=Saipan server tuning
+version=v1.0
+versionCode=1
+author=tingao
+description=Battery charge band (qpnp_adaptive_charge), keep-awake wakeup source, and CPU clock caps for the moto g50 5G server. Re-applies every 60s.

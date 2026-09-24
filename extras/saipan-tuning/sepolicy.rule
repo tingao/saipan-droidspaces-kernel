@@ -1,0 +1,30 @@
+# SELinux rules for the saipan server tuning module.
+#
+# On this device every interesting knob sits under a vendor-specific sysfs label that the
+# KernelSU `su` domain cannot write to by default:
+#
+#   /sys/module/qpnp_adaptive_charge/parameters/{upper,lower}_limit   vendor_sysfs_battery_supply
+#   /sys/devices/system/cpu/cpu*/cpufreq/*                            sysfs_devices_system_cpu
+#
+# Reads already work; only writes are denied. Grant exactly those two labels, and only to
+# the domains that actually need them (the KernelSU shell/module domain and the Droidspaces
+# daemon domain), rather than blanket-allowing sysfs.
+#
+# /sys/power/wake_lock is deliberately NOT listed: it is labelled sysfs_wake_lock and is
+# already writable, which is how the keep-awake lock is taken.
+
+# --- Motorola adaptive charge band (upper_limit / lower_limit) ---
+allow ksu vendor_sysfs_battery_supply file { open read write getattr }
+allow droidspacesd vendor_sysfs_battery_supply file { open read write getattr }
+allow init vendor_sysfs_battery_supply file { open read write getattr }
+allow vendor_init vendor_sysfs_battery_supply file { open read write getattr }
+
+# --- CPU frequency policy (scaling_max_freq / scaling_min_freq / scaling_governor) ---
+allow ksu sysfs_devices_system_cpu file { open read write getattr }
+allow droidspacesd sysfs_devices_system_cpu file { open read write getattr }
+allow init sysfs_devices_system_cpu file { open read write getattr }
+allow vendor_init sysfs_devices_system_cpu file { open read write getattr }
+
+# --- thermal zone readings (used by the watchdog to decide when to ease clocks off) ---
+allow ksu sysfs_therm file { open read getattr }
+allow ksu sysfs_therm dir { search read open getattr }

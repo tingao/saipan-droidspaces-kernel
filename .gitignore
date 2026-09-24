@@ -1,0 +1,15 @@
+# Build artefacts -- never commit these
+out/
+out-ksu/
+out-level/
+out-config/
+*.o
+*.ko
+*.log
+__pycache__/
+*.pyc
+
+# OS junk
+Thumbs.db
+desktop.ini
+.DS_Store
