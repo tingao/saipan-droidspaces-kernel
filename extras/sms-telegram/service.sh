@@ -22,10 +22,15 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 log "=== sms-telegram service.sh start ==="
 
 # KernelSU runs service.sh as root in the ksu domain; the SMS database is
-# radio_data_file, which that domain can read on this device (verified). If a
-# future policy stops it, the failure is a silent "nothing arrives", so say so.
-if [ ! -r /data/data/com.android.providers.telephony/databases/mmssms.db ]; then
-  log "WARNING: cannot read the SMS database - nothing will be forwarded"
+# radio_data_file, which that domain can read on this device (verified). At this
+# point in boot it is often not readable *yet*, which is not a fault - the poller
+# retries every minute and logs when it actually starts working. Only a warning
+# that persists is a problem, so this says so rather than crying wolf.
+SMSDB=/data/data/com.android.providers.telephony/databases/mmssms.db
+if [ -r "$SMSDB" ]; then
+  log "SMS database readable at boot"
+else
+  log "note: $SMSDB not readable yet this early in boot - the poller will retry every ${INTERVAL}s"
 fi
 
 pkill -9 -f "$MODDIR/poller.sh" 2>/dev/null
