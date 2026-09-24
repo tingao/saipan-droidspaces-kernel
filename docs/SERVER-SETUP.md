@@ -62,6 +62,28 @@ Droidspaces' docs recommend `cgroupfs` plus the `vfs` storage driver for legacy 
 `cgroupfs` was necessary; `vfs` was not - `overlay2` works here, and the base image's own
 docker had already proven it.
 
+**Could this be avoided by staying on cgroup v2?** No, and it is worth recording that this was
+tested rather than assumed, because it is the obvious question and the estate's own GKI notes
+say the opposite for newer kernels ("do not use `--force-cgroupv1`; stay on cgroup v2").
+
+The test: `force_cgroupv1=0` was set, the container came up cleanly, and `/sys/fs/cgroup` was
+`cgroup2fs`. With Docker 29.8.1 and **runc 1.5.1**, `docker run --rm hello-world` still failed
+with the same error, and so did `--privileged` and `--security-opt systempaths=unconfined`.
+`CONFIG_CGROUP_BPF=y` is set in the stock config, which is what makes this look like it should
+work.
+
+It cannot, because the missing piece is `BPF_CGROUP_DEVICE`, which arrived in **Linux 4.15**.
+The symbol appears **zero times** in the entire 4.14.186 tree, and the only cgroup BPF program
+types present are `BPF_PROG_TYPE_CGROUP_SKB` (4.10) and `BPF_PROG_TYPE_CGROUP_SOCK` (4.14) -
+what `CONFIG_CGROUP_BPF` covers on 4.14. On cgroup v2 there is no `devices` controller to fall
+back to; device rules *are* the BPF program. runc asks for it, gets `EINVAL`, and refuses.
+
+So this is a missing kernel feature, not a misconfiguration, and no Docker flag or config
+option reaches it. Making it work would mean backporting the 4.15 device-controller BPF work
+into this tree - a substantial change, and precisely the kind that risks the vendor-module ABI
+the rest of this project exists to preserve. cgroup v1 is also not the worse choice here: on v1
+the `devices` controller is a first-class kernel feature rather than a bolted-on program type.
+
 ### 2.3 The systemd socket-activation fix, inside the container
 
 Docker CE's unit uses `ExecStart=/usr/bin/dockerd -H fd://`, i.e. systemd socket activation. That
