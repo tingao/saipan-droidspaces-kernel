@@ -48,6 +48,56 @@ files underneath you, and a lock/suspend cycle can leave Wi-Fi switched off. A o
 script does not stay applied on this device - I have watched the charge band revert within
 minutes.
 
+### Battery: ACC
+
+Charging is controlled by **ACC (Advanced Charging Controller) v2023.10.16**, installed as a
+KernelSU module - the same module and the same version the S8+ runs, and the same idea the S21
+runs.
+
+```
+capacity=(0 101 55 60 false false)                            pause 60, resume 55
+chargingSwitch=(/proc/mtk_battery_cmd/en_power_path 1 0 --)   MTK charger, pinned
+temperature=(40 60 90 65)                                     mirrored from the S8+/S21
+prioritizeBattIdleMode=false                                  mirrored from the S8+/S21
+```
+
+The switch was **verified by hand before being trusted**, because ACC's auto-detection has failed
+on this estate before (on the S8+ it came up with no switch at all and charged to 100 % while
+looking configured):
+
+```
+echo 0 > /proc/mtk_battery_cmd/en_power_path   ->  current_now  +503 mA  ->  -127 mA
+echo 1 > /proc/mtk_battery_cmd/en_power_path   ->  current_now  -127 mA  ->  +466 mA
+```
+
+Two things about that interface are worth knowing:
+
+* **It takes a bare value.** `"0 0"` and `"1 0"` are accepted by the shell and silently ignored
+  by the driver - the node reads back `1` either way. Only `echo 0` / `echo 1` do anything.
+* **`status` keeps reporting `Charging` while the power path is off**, because the charger is
+  still attached. The only reliable signal is the sign of `current_now`. That is exactly what
+  ACC's `battStatusWorkaround` (on by default) handles, which is why the switch works with ACC
+  even though it looks contradictory.
+
+ACC needs write access to `proc_battery_cmd`, which the KernelSU `su` domain does not have by
+default - see the SELinux section below.
+
+**ACC is a KernelSU module, so it does not appear in the app drawer.** That is expected, not a
+failed install: there is no APK, only `accd`, `/data/adb/modules/acc/`, and the config at
+`/data/adb/vr25/acc-data/config.txt`. For a GUI, install **ACC Settings**
+([CrazyBoyFeng/AccSettings](https://github.com/CrazyBoyFeng/AccSettings),
+package `crazyboyfeng.accSettings`, v2022.6.7, targetSdk 32):
+
+```
+adb install app-debug.apk
+```
+
+It is a front-end for an ACC that is already installed, so it reads and writes the config above
+rather than replacing it. The alternative front-end,
+[AccA](https://github.com/MatteCarra/AccA), **ships its own copy of ACC and installs it on first
+launch** - the wrong shape here, because it would fight the KernelSU module that is already
+configured.
+
 ### Battery charge band (backstop only)
 
 ```
@@ -70,11 +120,55 @@ echo 75 > lower; echo 80 > upper   ->  reads back 80/-1   (lower lost)
 echo 80 > upper; echo 75 > lower   ->  reads back 80/75   (correct)
 ```
 
-Set `CHARGE_UPPER=-1` in `tuning.conf` for stock behaviour.
+Set `CHARGE_UPPER=-1` in `tuning.conf` for stock behaviour on the qpnp side.
 
 `tuning.conf` **must be LF-terminated.** With CRLF, `echo "$CHARGE_UPPER"` writes `"80\r"`, the
 driver rejects it, and the band silently stays disabled while the watchdog cheerfully logs
 "re-asserted" every minute. If you edit this file on Windows, save it as LF.
+
+### Airplane mode, driven by the SIM
+
+The cellular modem is powered whether or not it is useful. Whether it *is* useful depends on the
+SIM, which can change while the phone is deployed, so the policy is decided from the handset's
+own SIM state every minute rather than hard-coded:
+
+| `AIRPLANE_POLICY` | behaviour |
+|---|---|
+| `auto` (default) | **SIM fitted → airplane mode OFF**; no SIM → airplane mode ON, Wi-Fi kept alive |
+| `always` / `never` | force it on or off regardless of the SIM |
+
+`saipan-tuning/airplane-mode.sh auto` does the work; `status` prints the verdict, the raw modem
+reading and the absence streak, so there is nothing to infer.
+
+Stated once more, because it has been read backwards: **a SIM in the phone means airplane mode
+off.** The modem only gets cut when it reports a positive `ABSENT`.
+
+What this gets right, each of which it got wrong first:
+
+* **`UNKNOWN` is not "no SIM".** At boot, and during any modem reset, the modem reports `UNKNOWN`
+  before it has read the card. Treating that as absent turned airplane mode on for a handset that
+  has a SIM - it appears in the tuning log as `airplane ON (sim=READY)` immediately after
+  `Can't find service: settings`, on every boot. Only a positive `ABSENT` counts now, so the
+  failure mode is "the modem stays powered", which costs a little battery, rather than "the phone
+  was taken off the air".
+* **Two consecutive `ABSENT` readings are required** before the radio is cut. One reading during a
+  modem reset is not worth taking a phone off the air for, and the watchdog runs every minute, so
+  waiting costs nothing.
+* **The module does not act before the settings service is up**, because `settings put` fails
+  silently before then and leaves a half-applied state.
+* **`wifi` is removed from `airplane_mode_radios`.** Airplane mode normally switches Wi-Fi off
+  too. On a headless server that is fatal: after a reboot the framework applies airplane mode
+  before anything can re-enable Wi-Fi, and the phone comes up with no network at all.
+* **It reverts itself.** After enabling airplane mode it waits up to 60 s for an address *and* a
+  successful ping, and restores the previous state if neither arrives. Nobody is holding this
+  phone, so the revert has to be local.
+* **The log says why.** `airplane ON - no SIM fitted (modem reports ABSENT)` and
+  `airplane OFF - SIM fitted (modem reports LOADED, LycaMobile)`. The earlier bare
+  `airplane ON (sim=READY)` read as if the policy were inverted, which is exactly how it was
+  misread.
+
+`gsm.sim.state` stays readable with the radio cut - verified on this handset - which is what
+makes the check safe to evaluate in either direction.
 
 ### Keep-awake
 
@@ -90,17 +184,18 @@ Reasoning and costs: [../docs/KEEP-AWAKE.md](../docs/KEEP-AWAKE.md).
 Ceilings and governor, re-asserted every minute. The defaults in `tuning.conf` are the stock
 values for this handset's DVFS segment, so the mechanism is in place and changes nothing.
 
-`tuning-uc.conf` is the underclock drop-in (big cluster capped at 2,000,000 instead of
-2,203,000). Copy it over `tuning.conf` if you run something that pins the big cores - it
-measured −9.2 % throughput, which is exactly the clock ratio, and on light load it buys no
-thermal headroom (28.6-29.2 °C in both configurations).
+`tuning-uc.conf` is the **underclock** drop-in: big cluster capped at 2,000,000 kHz instead of
+2,203,000. It works exactly as advertised - throughput falls 9.3 %, which is the clock ratio to
+0.15 %, and the hardware PLL readback confirms 1,999,000 kHz against 2,202,000. On light load it
+buys no thermal headroom (28.6-29.2 °C either way), which is why the default is stock; if you run
+something that pins the big cores it becomes a real lever.
 
-There is deliberately **no overclock config**, because the one I built was rejected on evidence:
-the driver's 2.4 GHz table is another speed-bin's clock plan, and on an FY-binned part it
-reports 2.4 GHz while delivering about 45 % less throughput. Do not put `CPU_BIG_MAX=2400000`
-in this file and assume it did something useful. Details:
+There is deliberately **no overclock config** - not because the overclock is slower, but because
+it is *nothing*. Under `B24G` the driver reports 2.4 GHz through cpufreq while its own DVFS
+interface reports 2,202,000 kHz, so the PLL never moves, throughput is unchanged (929.6 against
+927.9 events/s), and the core voltage is 43.75 mV higher. Do not put `CPU_BIG_MAX=2400000` in this
+file and assume it did something useful. Details, and a correction to an earlier wrong figure:
 [../docs/CPU-CLOCK.md](../docs/CPU-CLOCK.md).
-
 ### SELinux
 
 Every interesting knob sits under a vendor-specific sysfs label that the KernelSU `su` domain
@@ -113,9 +208,14 @@ cannot write to by default:
 | `/proc/mtk_battery_cmd/en_power_path` | `proc_battery_cmd` (ACC's charging switch) |
 | `/sys/class/power_supply/*/status`, `charge_type` | `sysfs_batteryinfo` |
 
-Reads worked; only writes were denied. `sepolicy.rule` grants write on exactly those two labels
-to `ksu`, `droidspacesd`, `init` and `vendor_init`, rather than allowing sysfs broadly or
-running the phone permissive. SELinux stays **Enforcing**.
+Reads worked; only writes were denied. `sepolicy.rule` grants write on exactly those labels -
+`vendor_sysfs_battery_supply`, `sysfs_devices_system_cpu`, `proc_battery_cmd` and
+`sysfs_batteryinfo` - to `ksu`, `droidspacesd`, `init` and `vendor_init`, rather than allowing
+sysfs broadly or running the phone permissive. SELinux stays **Enforcing**.
+
+The rules are applied by KernelSU at boot from the module's `sepolicy.rule`. To change them
+without rebooting, `ksud sepolicy apply <file>` works on a live device, which is how the ACC
+switch was proven before anything was made permanent.
 
 `/sys/power/wake_lock` is deliberately not listed - it is `sysfs_wake_lock` and is already
 writable.

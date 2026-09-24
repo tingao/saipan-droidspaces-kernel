@@ -3,14 +3,21 @@
 #
 #   sh airplane-mode.sh auto|on|off|status
 #
-# Why this exists: the cellular modem is powered the whole time, and on a handset
-# that serves from a shelf it is pure cost. But whether it is *idle* or *useful*
-# depends entirely on the SIM, which can change while the phone is deployed. So the
-# policy is decided from the device's own SIM state on every pass rather than
-# hard-coded to one answer.
+# The rule, stated once so there is no room to read it backwards:
 #
-#   no SIM  ->  airplane mode ON, Wi-Fi explicitly kept alive
-#   SIM     ->  airplane mode OFF
+#   SIM FITTED    ->  airplane mode OFF   (the radio is wanted)
+#   NO SIM        ->  airplane mode ON    (Wi-Fi explicitly kept alive)
+#
+# Why the policy is evaluated rather than hard-coded: a phone that serves from a
+# shelf has a cellular modem powered whether or not it is useful, but whether it is
+# useful depends on the SIM, and the SIM can change while the phone is deployed.
+#
+# Why the "no SIM" decision is deliberately reluctant: taking a phone off the air
+# is the expensive mistake, leaving a modem powered is the cheap one. So this needs
+# the modem to report a positive ABSENT twice in a row before it cuts anything, and
+# anything ambiguous is left alone. An earlier version acted on a single reading and
+# turned airplane mode on for a handset that has a SIM - see the notes on
+# sim_absent() below.
 #
 # Self-healing by design: this runs ON the device, so it does not depend on the
 # SSH/tunnel session that asked for it. After enabling airplane mode it waits for
@@ -22,18 +29,16 @@ set -u
 ACTION="${1:-status}"
 STATE=/data/local/tmp/airplane-mode.previous
 LOCK=/data/local/tmp/airplane-mode.lock
+STREAK=/data/local/tmp/airplane-mode.absent-streak
 
 wifi_iface() { ip -4 -o addr show dev wlan0 2>/dev/null | awk '{print $4}'; }
 have_wifi()  { [ -n "$(wifi_iface)" ] && ping -c1 -W3 1.1.1.1 >/dev/null 2>&1; }
 airplane()   { settings get global airplane_mode_on 2>/dev/null; }
+operator()   { getprop gsm.operator.alpha 2>/dev/null; }
 
 # SIM detection that also works while airplane mode is on. Verified on this
 # handset: `gsm.sim.state` still reads LOADED with the radio cut, which is what
-# makes the policy safe to evaluate in both directions.
-#
-# NOT_READY is deliberately *not* treated as "no SIM": it only means the modem has
-# not finished initialising, and reading it as absent would turn airplane mode on
-# during boot and then never turn it off again.
+# makes the policy safe to evaluate in either direction.
 sim_state() {
   v=$(getprop gsm.sim.state 2>/dev/null)
   [ -n "$v" ] || v=UNKNOWN
@@ -47,12 +52,13 @@ sim_present() {
   esac
 }
 
-# UNKNOWN is deliberately NOT treated as "no SIM". At boot the modem reports
-# UNKNOWN before it has read the card, and treating that as absent turned airplane
-# mode on for a phone that has a SIM - observed on the first cold boot after this
-# was installed. Only a positive ABSENT counts, so the failure mode is "the radio
-# stays on", which costs a little power, instead of "the radio is cut on a phone
-# that needed it".
+# UNKNOWN is deliberately NOT treated as "no SIM". At boot, and during any modem
+# reset, the modem reports UNKNOWN before it has read the card. Treating that as
+# absent turned airplane mode on for a handset that has a SIM - visible in the
+# tuning log at 23:02, 23:05, 23:08 and 23:11, where "airplane ON (sim=READY)"
+# appeared right after "Can't find service: settings". Only a positive ABSENT
+# counts, so the failure mode is "the modem stays powered", which costs a little
+# battery, instead of "the phone was taken off the air".
 sim_absent() {
   case "$(sim_state)" in
     ABSENT|CARD_IO_ERROR|CARD_NOT_INSERTED) return 0 ;;
@@ -89,6 +95,10 @@ restore_state() {
 }
 
 do_on() {
+  # $1 is the modem reading that triggered this, so the log records the cause. A
+  # bare "airplane ON" with no reason reads as if the policy were inverted, which
+  # is how this was misread once already.
+  why="${1:-$(sim_state)}"
   save_state
   protect_wifi_radio
   settings put global airplane_mode_on 1
@@ -107,7 +117,10 @@ do_on() {
     i=$((i + 1))
   done
   if have_wifi; then
-    echo "  airplane ON (sim=$(sim_state)), Wi-Fi up at $(wifi_iface)"
+    case "$why" in
+      forced*) echo "  airplane ON - forced by hand, Wi-Fi up at $(wifi_iface)" ;;
+      *)       echo "  airplane ON - no SIM fitted (modem reports $why), Wi-Fi up at $(wifi_iface)" ;;
+    esac
     return 0
   fi
   echo "  Wi-Fi did NOT come back within 60 s - reverting so the handset stays reachable"
@@ -117,19 +130,23 @@ do_on() {
 }
 
 do_off() {
+  why="${1:-$(sim_state)}"
   settings put global airplane_mode_on 0
   am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false >/dev/null 2>&1
   svc wifi enable
-  echo "  airplane OFF (SIM: $(sim_state)/$(getprop gsm.operator.alpha 2>/dev/null))"
+  op=$(operator)
+  case "$why" in
+    forced*) echo "  airplane OFF - forced by hand" ;;
+    *)       echo "  airplane OFF - SIM fitted (modem reports $why${op:+, $op})" ;;
+  esac
 }
 
 # Cheap, idempotent pass for the watchdog: only touches anything when the desired
-# state differs from the current one, so it costs two getprop/settings reads a
-# minute and never flaps the radio.
+# state differs from the current one, so it costs two property reads a minute and
+# never flaps the radio.
 do_auto() {
   if [ -e "$LOCK" ]; then return 0; fi
   : > "$LOCK"
-  trap 'rm -f "$LOCK"' EXIT
 
   # The settings service is not up until well into boot; acting before that gets a
   # "Can't find service: settings" and a half-applied state. The watchdog retries
@@ -138,38 +155,48 @@ do_auto() {
   case "$cur" in
     ''|null|*"Can't find service"*)
       echo "  settings service not up yet - leaving airplane mode alone"
-      rm -f "$LOCK"; trap - EXIT; return 0 ;;
+      rm -f "$LOCK"; return 0 ;;
   esac
 
-  want=unchanged
   if sim_present; then
-    want=0
-  elif sim_absent; then
-    want=1
+    # SIM fitted: airplane mode must be OFF. Reset the absence streak.
+    echo 0 > "$STREAK" 2>/dev/null
+    [ "$cur" = "0" ] || do_off
+    rm -f "$LOCK"; return 0
   fi
 
-  case "$want" in
-    unchanged)
-      echo "  sim=$(sim_state) - indeterminate, leaving airplane mode alone"
-      ;;
-    0)
-      [ "$(airplane)" = "0" ] || do_off
-      ;;
-    1)
-      protect_wifi_radio
-      if [ "$(airplane)" != "1" ]; then
-        do_on
-      elif ! have_wifi; then
-        # Airplane mode is on as intended but the uplink died - re-assert Wi-Fi.
-        svc wifi enable
-        settings put global wifi_on 1
-        cmd wifi set-wifi-enabled enabled >/dev/null 2>&1 || true
-        echo "  airplane already ON, Wi-Fi was down - re-enabled"
-      fi
-      ;;
-  esac
+  if ! sim_absent; then
+    echo "  sim=$(sim_state) - indeterminate, leaving airplane mode alone"
+    rm -f "$LOCK"; return 0
+  fi
+
+  # Positive ABSENT and airplane mode already on: that is the intended state, so
+  # only make sure the uplink survived.
+  if [ "$cur" = "1" ]; then
+    if ! have_wifi; then
+      svc wifi enable
+      settings put global wifi_on 1
+      cmd wifi set-wifi-enabled enabled >/dev/null 2>&1 || true
+      echo "  airplane already ON, Wi-Fi was down - re-enabled"
+    fi
+    rm -f "$LOCK"; return 0
+  fi
+
+  # Positive ABSENT and airplane mode currently off. Require the reading to hold
+  # for a second pass before cutting the radio: one ABSENT during a modem reset is
+  # not worth taking a phone off the air for, and waiting a minute costs nothing on
+  # a server.
+  n=$(cat "$STREAK" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  n=$((n + 1))
+  echo "$n" > "$STREAK" 2>/dev/null
+  if [ "$n" -lt 2 ]; then
+    echo "  sim=$(sim_state) - first ABSENT reading, waiting for a second before cutting the radio"
+    rm -f "$LOCK"; return 0
+  fi
+
+  do_on "$(sim_state)"
   rm -f "$LOCK"
-  trap - EXIT
 }
 
 case "$ACTION" in
@@ -178,14 +205,19 @@ case "$ACTION" in
     echo "  airplane_mode_radios      : $(settings get global airplane_mode_radios)"
     echo "  wifi_on                   : $(settings get global wifi_on)"
     echo "  wlan0                     : $(wifi_iface)"
-    echo "  SIM state                 : $(sim_state)  operator=$(getprop gsm.operator.alpha 2>/dev/null)"
-    if sim_present; then echo "  policy verdict            : SIM present -> airplane OFF";
-    elif sim_absent; then echo "  policy verdict            : no SIM -> airplane ON";
-    else echo "  policy verdict            : indeterminate -> leave alone"; fi
+    echo "  SIM state                 : $(sim_state)  operator=$(operator)"
+    echo "  absent streak             : $(cat "$STREAK" 2>/dev/null || echo 0)/2"
+    if sim_present; then
+      echo "  policy verdict            : SIM fitted -> airplane mode OFF"
+    elif sim_absent; then
+      echo "  policy verdict            : no SIM -> airplane mode ON"
+    else
+      echo "  policy verdict            : indeterminate -> leave alone"
+    fi
     echo "  reachable                 : $(have_wifi && echo yes || echo no)"
     ;;
   auto)   do_auto ;;
-  on)     do_on ;;
-  off)    do_off ;;
+  on)     do_on "forced by hand" ;;
+  off)    do_off "forced by hand" ;;
   *)      echo "usage: $0 auto|on|off|status"; exit 2 ;;
 esac
