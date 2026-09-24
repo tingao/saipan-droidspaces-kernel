@@ -130,12 +130,19 @@ driver rejects it, and the band silently stays disabled while the watchdog cheer
 
 The cellular modem is powered whether or not it is useful. Whether it *is* useful depends on the
 SIM, which can change while the phone is deployed, so the policy is decided from the handset's
-own SIM state every minute rather than hard-coded:
+own SIM state rather than hard-coded - hourly by default (`SIM_CHECK_EVERY=60`):
 
 | `AIRPLANE_POLICY` | behaviour |
 |---|---|
 | `auto` (default) | **SIM fitted → airplane mode OFF**; no SIM → airplane mode ON, Wi-Fi kept alive |
 | `always` / `never` | force it on or off regardless of the SIM |
+
+How often it re-evaluates is `SIM_CHECK_EVERY`, counted in watchdog passes - the watchdog ticks
+every 60 s, so **60 is hourly** and is what this runs at. A SIM change is therefore noticed within
+the hour, or the hour after that for removal, since the policy waits for a second `ABSENT` reading
+before cutting the radio. Set it to `1` for every minute (what you want if you are swapping SIMs),
+or `1440` for daily. Re-evaluating is only two property reads, so the setting is purely about
+reaction time.
 
 `saipan-tuning/airplane-mode.sh auto` does the work; `status` prints the verdict, the raw modem
 reading and the absence streak, so there is nothing to infer.
@@ -152,7 +159,7 @@ What this gets right, each of which it got wrong first:
   failure mode is "the modem stays powered", which costs a little battery, rather than "the phone
   was taken off the air".
 * **Two consecutive `ABSENT` readings are required** before the radio is cut. One reading during a
-  modem reset is not worth taking a phone off the air for, and the watchdog runs every minute, so
+  modem reset is not worth taking a phone off the air for, and the check runs hourly, so
   waiting costs nothing.
 * **The module does not act before the settings service is up**, because `settings put` fails
   silently before then and leaves a half-applied state.

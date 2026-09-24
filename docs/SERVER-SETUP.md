@@ -182,7 +182,7 @@ ships a narrow `sepolicy.rule` granting write on exactly those two labels to `ks
 
 The modem is powered whether or not it is useful, and whether it is useful depends on the SIM -
 which can change while the phone is deployed. So the policy is read from the handset's own SIM
-state every minute instead of being hard-coded: no SIM means airplane mode on with Wi-Fi kept
+state instead of being hard-coded - hourly by default (`SIM_CHECK_EVERY=60`, one watchdog pass per minute): no SIM means airplane mode on with Wi-Fi kept
 alive, a SIM means the radio stays up. Full reasoning, including the `UNKNOWN`-at-boot trap that
 turned the radio off on a phone that has a SIM, is in [../extras/README.md](../extras/README.md).
 

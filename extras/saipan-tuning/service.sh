@@ -93,8 +93,11 @@ if [ -x "$MODDIR/airplane-mode.sh" ]; then
 fi
 # ---------------------------------------------------------------- watchdog
 if [ -x "$MODDIR/watchdog.sh" ]; then
-  # kill any previous instance, then detach a fresh one
-  pkill -f "$MODDIR/watchdog.sh" 2>/dev/null
+  # kill any previous instance, then detach a fresh one.
+  # -9 is deliberate: a plain SIGTERM has been observed not to land here, which
+  # left two watchdogs running after a manual restart. The loop is idempotent so
+  # duplicates are harmless, but they double the log noise.
+  pkill -9 -f "$MODDIR/watchdog.sh" 2>/dev/null
   sleep 1
   setsid nohup "$MODDIR/watchdog.sh" >/dev/null 2>&1 &
   log "watchdog: started (pid $!)"
