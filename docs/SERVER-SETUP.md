@@ -18,7 +18,7 @@ is Enforcing.
 | Root | KernelSU-Next, **manual-hook** mode - [KERNEL-NOTES.md](KERNEL-NOTES.md) §5 explains why nothing else works on 4.14 |
 | Vendor modules | 17 of 17 load - Wi-Fi, Bluetooth, touch, fingerprint, GPS, FM, sensors |
 | Runtime | Droidspaces v6.5.5 |
-| Container | `debian-moto` - Debian GNU/Linux 13 (trixie), systemd as PID 1, NAT network, `172.28.205.17`, `run_at_boot=1` |
+| Container | `bagda` - Debian GNU/Linux 13 (trixie), systemd as PID 1, NAT network, `172.28.205.17`, `run_at_boot=1` |
 | Inside | Docker Engine 29.8.1, `overlay2`, cgroup driver `cgroupfs`, **cgroup v1**, Compose v5.5.1 |
 | Host tuning | ACC holds the pack at 55-60 % (qpnp band 75-80 % as a backstop), wakeup source `saipan-awake`, CPU ceilings, SIM-driven airplane mode - all re-asserted every 60 s |
 | SELinux | **Enforcing** - permissive only during setup |
@@ -29,7 +29,7 @@ is Enforcing.
 
 Nested containers on this kernel need three non-default settings. I found all three by hitting
 the failure first, and all three are persisted in
-`/data/local/Droidspaces/Containers/debian-moto/container.config`.
+`/data/local/Droidspaces/Containers/bagda/container.config`.
 
 ### 2.1 `--privileged=noseccomp` - the Adaptive Seccomp Shield
 
@@ -228,8 +228,8 @@ su -c "/system/bin/sh /data/local/tmp/verify-tuning.sh"
 
 # container + docker
 su -c "/data/local/Droidspaces/bin/droidspaces show"
-su -c "/data/local/Droidspaces/bin/droidspaces --name=debian-moto run docker info"
-su -c "/data/local/Droidspaces/bin/droidspaces --name=debian-moto run docker run --rm hello-world"
+su -c "/data/local/Droidspaces/bin/droidspaces --name=bagda run docker info"
+su -c "/data/local/Droidspaces/bin/droidspaces --name=bagda run docker run --rm hello-world"
 
 # tuning log
 su -c "tail -30 /data/local/saipan-tuning.log"
@@ -238,7 +238,7 @@ su -c "tail -30 /data/local/saipan-tuning.log"
 Get a shell in the container:
 
 ```sh
-su -c "/data/local/Droidspaces/bin/droidspaces --name=debian-moto enter"
+su -c "/data/local/Droidspaces/bin/droidspaces --name=bagda enter"
 ```
 
 ---
@@ -269,7 +269,7 @@ reachable three ways:
 |---|---|---|
 | tunnel | `ssh motog` / `ssh bagda` | anywhere, through Cloudflare |
 | LAN | `ssh motog-lan` | on the same Wi-Fi |
-| out-of-band | `su -c 'droidspaces --name=debian-moto run <cmd>'` | always, from a USB cable |
+| out-of-band | `su -c 'droidspaces --name=bagda run <cmd>'` | always, from a USB cable |
 
 ### 6.1 The tunnel
 
@@ -323,3 +323,58 @@ Every login renders the suite installed by `container-baseline.sh` - system and 
 CPU/RAM/disk with the handset's battery on its own line, sshguard counters, listening ports,
 fastfetch and the container list. It is the fastest way to tell whether the phone is healthy
 without running anything.
+
+---
+
+## 7. Two things the handset does not allow, and one it did
+
+### 7.1 The container kernel-panicked on 2026-09-25, because of apt
+
+```
+Kernel panic - not syncing: Out of memory and no killable processes...
+(7)[10025:unattended-upgr]
+```
+
+Recovered from `/sys/fs/pstore/dmesg-ramoops-0` after the phone rebooted itself.
+
+The container shares the handset's kernel and has **no memory limit**, so a process
+inside it can starve Android. `unattended-upgrades` - which the container baseline
+enables - ran `apt`/`dpkg`, and the phone has 3.7 GB with Android userspace already
+holding most of it. The kernel's OOM killer then found nothing it was allowed to
+kill and panicked rather than returning an error.
+
+Worth being precise about where the memory goes, because the obvious suspect is
+wrong:
+
+| | RSS |
+|---|---|
+| the whole container (dockerd + portainer + containerd + cloudflared + systemd) | **~200 MB** |
+| `com.google.android.gms` | 437 MB |
+| `system_server` | 386 MB |
+| `com.google.android.gms.unstable` | 243 MB |
+| `com.android.systemui` + Messaging + launcher + dialer + Gboard + Play Store | ~950 MB |
+
+So it is not a leak and not the container being greedy - the phone simply runs tight,
+and apt was the thing that tipped it over. **Automatic updates are therefore off**:
+
+```sh
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
+```
+
+with `APT::Periodic::*` set to `0` in `/etc/apt/apt.conf.d/20auto-upgrades` so nothing
+re-arms them. Updates are a deliberate action now: `apt-get update && apt-get -y upgrade`.
+
+The tuning module also watches `MemAvailable` and logs when it drops below 600 MB,
+dropping page cache below 300 MB. That cannot prevent the next one, but it means the
+run-up appears in `/data/local/saipan-tuning.log` instead of only in pstore after a
+restart.
+
+### 7.2 A container memory limit is not available here either
+
+`memory_limit=` exists in `container.config`, but Droidspaces implements it by writing
+`memory.max` - a **cgroup v2** file. Forced onto cgroup v1 by the missing
+`BPF_CGROUP_DEVICE` ([§2.2](#22---force-cgroupv1---bpf_cgroup_device)), there is no
+`memory.max` to write.
+
+So the same 4.14 constraint costs two things at once: no cgroup v2 device control, and
+no container memory ceiling. Worth knowing before reaching for either.

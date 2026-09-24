@@ -130,6 +130,30 @@ while true; do
       "$MODDIR/airplane-mode.sh" "$AP" >/dev/null 2>&1
     fi
   fi
+  # ---- memory guard -----------------------------------------------------
+  # On 2026-09-25 the handset kernel-panicked with "Out of memory and no killable
+  # processes" while apt ran inside the container:
+  #
+  #   Kernel panic - not syncing: Out of memory and no killable processes...
+  #   (7)[10025:unattended-upgr]
+  #
+  # The phone has 3.7 GB and Android userspace already holds most of it (GMS 437 MB,
+  # system_server 386 MB, and so on), so a memory-hungry process in the container
+  # can tip it over - the container itself only uses about 200 MB. Automatic
+  # updates are now off, which was the trigger. This cannot prevent the next one,
+  # but it makes the run-up visible in the log instead of only in pstore after a
+  # reboot, and frees page cache when it gets close.
+  avail=$(sed -n 's/^MemAvailable:[[:space:]]*\([0-9]*\) kB/\1/p' /proc/meminfo 2>/dev/null)
+  case "$avail" in ''|*[!0-9]*) avail=0 ;; esac
+  avail=$((avail / 1024))
+  if [ "$avail" -gt 0 ] && [ "$avail" -lt 600 ]; then
+    log "memory: MemAvailable ${avail} MB - low"
+    if [ "$avail" -lt 300 ]; then
+      sync
+      echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+      log "memory: dropped page cache at ${avail} MB"
+    fi
+  fi
   # ---- wifi watchdog ----------------------------------------------------
   if [ "$WIFI_WATCHDOG" = "1" ]; then
     wifi_on=$(settings get global wifi_on 2>/dev/null)

@@ -73,7 +73,7 @@ The reasoning, and the traps that go with it, are in **[docs/KERNEL-NOTES.md](do
 | Wi-Fi | connected, associated, default route up |
 | Root | KernelSU-Next, `su -c id` → `uid=0(root) … context=u:r:ksu:s0` |
 | SELinux | **Enforcing** |
-| Droidspaces | v6.5.5, container `debian-moto`, Debian 13 trixie, systemd as PID 1 |
+| Droidspaces | v6.5.5, container `bagda`, Debian 13 trixie, systemd as PID 1 |
 | Docker inside the container | Engine 29.8.1, `overlay2`, cgroup driver `cgroupfs`, **cgroup v1**, Compose v5.5.1, `hello-world` rc=0 |
 | Kernel release string | `4.14.186+` - byte-identical to the stock vermagic |
 
@@ -102,7 +102,7 @@ Three non-default settings are required to get nested containers running on 4.14
 all three by hitting the failure first:
 
 ```sh
-droidspaces --name=debian-moto start --net=nat --hw-access --privileged=noseccomp --force-cgroupv1
+droidspaces --name=bagda start --net=nat --hw-access --privileged=noseccomp --force-cgroupv1
 ```
 
 * **`--privileged=noseccomp`** - on legacy kernels (3.18-4.19) Droidspaces intercepts

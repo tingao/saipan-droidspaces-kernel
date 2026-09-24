@@ -49,6 +49,13 @@ files underneath you, and a lock/suspend cycle can leave Wi-Fi switched off. A o
 script does not stay applied on this device - I have watched the charge band revert within
 minutes.
 
+It also watches `MemAvailable` and logs when it falls below 600 MB, dropping page cache below
+300 MB. That is there because the handset kernel-panicked on 2026-09-25 with *"Out of memory and
+no killable processes"* while `apt` ran inside the container - the phone has 3.7 GB and Android
+userspace already holds most of it. Automatic updates are off now, which was the trigger; this
+just makes the run-up visible in the log rather than only in pstore after a reboot. See
+[../docs/SERVER-SETUP.md](../docs/SERVER-SETUP.md) §7.
+
 ### Battery: ACC
 
 Charging is controlled by **ACC (Advanced Charging Controller) v2023.10.16**, installed as a

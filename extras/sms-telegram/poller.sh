@@ -16,7 +16,7 @@
 set -u
 
 INTERVAL="${1:-60}"
-CONT=debian-moto
+CONT=bagda
 SPOOL_HOST=/data/local/Droidspaces/Containers/$CONT/rootfs/var/spool/sms-telegram
 DB=/data/data/com.android.providers.telephony/databases/mmssms.db
 STAMP=/data/local/sms-telegram.dbstamp
