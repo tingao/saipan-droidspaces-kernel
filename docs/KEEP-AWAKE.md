@@ -87,8 +87,38 @@ sh /path/to/container-no-suspend.sh
 On a headless server phone the local revert path is the whole point - a suspend that succeeds
 takes the box off the air until somebody physically touches it.
 
+## The display is allowed to sleep, and that is deliberate
+
+An early version of `extras/saipan-tuning` set `stay_on_while_plugged_in=7` and a
+`screen_off_timeout` of 2147483647 ms. That was wrong, and it is worth saying plainly why:
+what keeps this handset serving is the kernel wakeup source taken in `service.sh`, which keeps
+CPU and radio alive **whether or not the panel is lit**. The panel was doing no work, and a
+phone left face-up with its screen on for days is how you get image retention.
+
+Both settings are now `0` and `60000` (one minute), re-asserted by the watchdog because
+`service.sh` often runs before the settings service is up and its `settings put` then fails
+silently.
+
+**Measured on saipan, so nobody has to re-litigate it:** pausing and resuming the charge path
+the way ACC does - writing `1` then `0` to `/proc/mtk_battery_cmd/en_power_path` - does **not**
+wake the display here. Four toggles with the screen asleep produced zero `power_screen_state`
+events, and `dumpsys battery` still reported `AC powered: true` in the paused, resumed and
+paused-again states.
+
+This ROM does carry the trap (`mWakeUpWhenPluggedOrUnpluggedConfig=true`), so the check was
+worth running: on the S8+ and S21 the same ACC behaviour made the kernel report the charger
+offline, Android saw an unplug, and the screen lit for about ten minutes several times an hour.
+Saipan's MTK charger driver keeps reporting the AC source regardless of `en_power_path`, so the
+wake-on-plug path is never reached and no overlay to force `config_unplugTurnsOnScreen=false`
+is needed. That is fortunate - mounting an RRO for it is what took `system_server` down on the
+S21.
+
 ## Two things this is often confused with
 
 * **The battery percentage is not evidence of anything.** See above.
-* **`usb online=1` with `status=Discharging` is normal** when the charge band is pausing charge
-  inside its range. It does not mean the cable is data-only or the charger is dead.
+* **A paused charge path does not look like an unplugged charger.** While ACC is holding inside
+  its band on saipan, `/sys/class/power_supply/usb/online` reads `0` and
+  `/sys/class/power_supply/battery/status` still reads `Charging`, yet Android reports
+  `AC powered: true`. None of those four readings disagree with each other, and none of them
+  means the cable is data-only or the charger is dead. An earlier revision of this file claimed
+  `online=1` with `Discharging`; that was never measured on this device and is wrong.

@@ -75,10 +75,14 @@ apply_cpu() {
 apply_cpu
 log "cpu: little=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null)/$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null) big=$(cat /sys/devices/system/cpu/cpu6/cpufreq/scaling_max_freq 2>/dev/null)/$(cat /sys/devices/system/cpu/cpu6/cpufreq/scaling_governor 2>/dev/null)"
 
-# Android-side extras that stop the handset idling itself to sleep
-settings put global stay_on_while_plugged_in 7 2>/dev/null
-settings put system screen_off_timeout 2147483647 2>/dev/null
-log "android: stay_on_while_plugged_in=$(settings get global stay_on_while_plugged_in 2>/dev/null)"
+# Let the DISPLAY sleep. What keeps this handset serving is the kernel wakeup source
+# taken above, which has nothing to do with the panel - an earlier version of this
+# module set stay_on_while_plugged_in=7 and a 24-day screen timeout, which meant the
+# screen was still lit whenever anyone picked the phone up. A panel left on for days
+# is how you get image retention, and it was never doing any work.
+settings put global stay_on_while_plugged_in 0 2>/dev/null
+settings put system screen_off_timeout 60000 2>/dev/null
+log "android: stay_on_while_plugged_in=$(settings get global stay_on_while_plugged_in 2>/dev/null) screen_off_timeout=$(settings get system screen_off_timeout 2>/dev/null)"
 
 # ---------------------------------------------------------------- airplane mode
 # No SIM -> airplane mode on, so the idle modem stops costing power. SIM -> off.

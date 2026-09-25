@@ -101,15 +101,19 @@ while true; do
   # service.sh also sets these at boot, but at that point the settings service is
   # frequently not up yet and `settings put` fails silently - the boot log shows
   # "stay_on_while_plugged_in=" with nothing after it. Re-assert them here instead,
-  # where the framework is definitely running, so the value does not depend on
-  # having caught the boot window.
-  if [ "$(settings get global stay_on_while_plugged_in 2>/dev/null)" != "7" ]; then
-    settings put global stay_on_while_plugged_in 7 2>/dev/null
-    log "android: stay_on_while_plugged_in re-asserted -> $(settings get global stay_on_while_plugged_in 2>/dev/null)"
+  # where the framework is definitely running.
+  #
+  # Both values let the DISPLAY sleep. Nothing here needs it awake: the wakeup source
+  # taken above keeps the CPU and radio alive whether the panel is on or off, and a
+  # screen left lit for days risks image retention for no benefit. This replaces the
+  # earlier values (7 and 2147483647) which did exactly that.
+  if [ "$(settings get global stay_on_while_plugged_in 2>/dev/null)" != "0" ]; then
+    settings put global stay_on_while_plugged_in 0 2>/dev/null
+    log "android: stay_on_while_plugged_in re-asserted -> 0 (display may sleep)"
   fi
-  if [ "$(settings get system screen_off_timeout 2>/dev/null)" != "2147483647" ]; then
-    settings put system screen_off_timeout 2147483647 2>/dev/null
-    log "android: screen_off_timeout re-asserted"
+  if [ "$(settings get system screen_off_timeout 2>/dev/null)" != "60000" ]; then
+    settings put system screen_off_timeout 60000 2>/dev/null
+    log "android: screen_off_timeout re-asserted -> 60000 (1 minute)"
   fi
 
   # ---- airplane mode / SIM policy ---------------------------------------
