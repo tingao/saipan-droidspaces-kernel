@@ -43,7 +43,15 @@ while true; do
     [ -n "$now" ] || now=$(ls -l "$DB" 2>/dev/null | awk '{print $5"-"$6"-"$7"-"$8}')
     prev=$(cat "$STAMP" 2>/dev/null)
 
-    if [ "$now" != "$prev" ]; then
+    # Copy when the database changed, and also when the snapshot is simply not there.
+    #
+    # The stamp alone is not enough. It records what was last copied, not whether that
+    # copy still exists. When the container was renamed debian-moto -> bagda the new
+    # spool came up empty while the stamp still matched the database, so the poller sat
+    # on a revision it had never actually delivered and would not have retried until the
+    # next SMS arrived. The sender now leaves the snapshot in place, so a missing file
+    # means it was genuinely lost and re-copying once is the right answer.
+    if [ "$now" != "$prev" ] || [ ! -f "$SPOOL_HOST/mmssms.db" ]; then
       if dd if="$DB" of="$SPOOL_HOST/mmssms.db.part" 2>/dev/null; then
         mv -f "$SPOOL_HOST/mmssms.db.part" "$SPOOL_HOST/mmssms.db" 2>/dev/null
         # A stale journal would make sqlite3 try to replay it against the copy.

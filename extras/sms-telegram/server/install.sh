@@ -7,6 +7,7 @@ set -e
 
 SPOOL=/var/spool/sms-telegram
 STATE=/var/lib/sms-telegram
+ARCHIVE=/var/lib/sms-telegram/archive
 CONF=/etc/telegram-sms/config.env
 
 echo "=== dependencies ==="
@@ -23,8 +24,9 @@ echo
 echo "=== directories ==="
 install -d -m 0755 "$SPOOL"
 install -d -m 0755 "$STATE"
+install -d -m 0755 "$ARCHIVE"
 install -d -m 0700 /etc/telegram-sms
-ls -ld "$SPOOL" "$STATE" /etc/telegram-sms
+ls -ld "$SPOOL" "$STATE" "$ARCHIVE" /etc/telegram-sms
 
 echo
 echo "=== credentials ==="

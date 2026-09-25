@@ -299,6 +299,13 @@ Two decisions worth recording:
 * **The database is copied into the container's own rootfs**, which is a directory
   on `/data`. That needs no bind mount and no container restart. The copy is
   written as `.part` and renamed, so the container never opens a half-written file.
+* **A matching stamp is not proof the copy still exists.** The poller skips the
+  copy when the database's size-mtime is unchanged, which is right until the
+  snapshot goes missing while the database is static - which is exactly what
+  happened when the container directory was renamed `debian-moto` to `bagda`: the
+  fresh spool was empty, the stamp still matched, and the poller would not have
+  re-copied until the next SMS arrived. It now also copies when the destination
+  file is absent, so a missing snapshot is unambiguous and self-healing.
 
 State lives in `/var/lib/sms-telegram/last_id`, a high-water mark on the message
 `_id`. Two edge cases it handles, both of which it got wrong first:
@@ -313,6 +320,18 @@ State lives in `/var/lib/sms-telegram/last_id`, a high-water mark on the message
 
 Delivery failures do not advance the mark, so a message that fails to send is
 retried on the next pass rather than lost.
+
+**The server also keeps the messages.** Telegram is how they reach a human; it is not
+a record you control, and a bot's chat history is not a backup. Every forwarded message
+is appended to `/var/lib/sms-telegram/archive/<YYYY-MM>.log`, one tab-separated line per
+message with the timestamp, the sender and the body (newlines flattened so one message is
+one greppable line).
+
+For the same reason the snapshot is **not** deleted after a pass, which it used to be.
+Removing it made an empty spool mean two different things - "delivered and current" or
+"lost" - and the poller could not tell them apart. Leaving it in place makes its presence
+mean "the host has given me this revision", a genuinely missing file unambiguously lost,
+and re-running a pass free: the mark comparison exits without touching the network.
 
 ### The app (SmsForwarder)
 
