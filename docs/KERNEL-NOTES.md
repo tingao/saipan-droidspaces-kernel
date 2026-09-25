@@ -389,3 +389,52 @@ documented in [../build/README.md](../build/README.md).
 
 I keep all three on disk. The blankflash is the one you hope never to need, and it is also the
 one you cannot download after the phone stops booting.
+
+## 9. Two hardening features the published branch does not have
+
+Found while auditing "what else did the custom kernel cost" against the stock config. **Two stock
+options are silently dropped by any build from this source branch**, and they are not cosmetic:
+
+| stock config | this tree |
+|---|---|
+| `CONFIG_ARM64_ERRATUM_1188873=y` | **no such symbol anywhere** |
+| `CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY=y` | **no `CONFIG_MITIGATE_*` symbol at all** |
+
+This is not a config mistake and no `defconfig` edit fixes it. The symbols do not exist in the
+tree - `grep -rn` across every `Kconfig`, `Makefile`, `.c` and `.h` returns **zero hits**, and
+`make olddefconfig` on the untouched stock config drops both. The tree carries errata 826319,
+827319, 824069, 819472, 832075, 834220, 845719, 843419, 1024718 and 1542418, and 1188873 is not
+among them. Motorola hardened the kernel they shipped and did not publish that work on the branch
+we build from.
+
+**Confirmed against the binaries, not just the config:**
+
+```
+                                  stock kernel    this kernel
+"ARM erratum 1188873"                  1               0
+"Spectre-BHB"                        present         absent
+"spectre-bhb mitigation disabled
+ by command line option"             present         absent
+```
+
+So the shipping kernel really does implement both, and every kernel in
+[../releases/](../releases/) really does not - including the first one, long before the cgroup v2
+work. It has been a standing cost of running a custom kernel on this handset.
+
+**What it looks like from userspace.** This kernel reports no `spectre_bhb` entry in
+`/sys/devices/system/cpu/vulnerabilities/` and says `spectre_v2: Not affected`. That last part is
+worth being careful about: Cortex-A76 is the core named in erratum 1188873, and this SoC
+(MT6833, Dimensity 700) has two of them alongside six A55s, so "Not affected" is the reporting
+of a kernel that lacks the mitigation code rather than a finding about the silicon. I have not
+verified what the stock kernel prints for the same file, because that means flashing it back.
+
+**Restoring them is a port, not a toggle.** `MITIGATE_SPECTRE_BRANCH_HISTORY` is the arm64
+branch-history-injection mitigation, and its meat is assembly in the entry path
+(`arch/arm64/kernel/entry.S` plus the `mitigate_spectre_bhb` macros in
+`arch/arm64/include/asm/assembler.h`), with the CPU matching in `cpu_errata.c`. Erratum 1188873
+is a `depends on ARM64_CPUCAP_WEAK_LOCAL_CPU_FEATURE` workaround in the same area. Both are
+upstream, both are backportable in principle, and both touch the path the phone takes on every
+exception - so a mistake there is a device that does not boot rather than a feature that does not
+work. That is why it is written down here as an open item with the risk stated, rather than
+quietly attempted.
+
