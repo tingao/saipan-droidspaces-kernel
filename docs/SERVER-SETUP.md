@@ -78,10 +78,42 @@ types present are `BPF_PROG_TYPE_CGROUP_SKB` (4.10) and `BPF_PROG_TYPE_CGROUP_SO
 what `CONFIG_CGROUP_BPF` covers on 4.14. On cgroup v2 there is no `devices` controller to fall
 back to; device rules *are* the BPF program. runc asks for it, gets `EINVAL`, and refuses.
 
-So this is a missing kernel feature, not a misconfiguration, and no Docker flag or config
-option reaches it. Making it work would mean backporting the 4.15 device-controller BPF work
-into this tree - a substantial change, and precisely the kind that risks the vendor-module ABI
-the rest of this project exists to preserve. cgroup v1 is also not the worse choice here: on v1
+So this is a missing kernel feature, not a misconfiguration, and no Docker flag or config option
+reaches it.
+
+**But it is not unfixable, and an earlier version of this page was too pessimistic about that.**
+[ravindu644](https://github.com/ravindu644) pointed at the right place on the Droidspaces PR:
+[Kernels-by-ravindu644/samsung_kernel_exynos9820_extremerom@98d18e2](https://github.com/Kernels-by-ravindu644/samsung_kernel_exynos9820_extremerom/commit/98d18e2a7ec198d695e0b1a12f30c3bb76384cd7).
+
+That commit does **not** drop into this tree, and the reason is worth understanding rather than
+just trying it. His kernel reports itself as `4.14.356-openela-rc1` - OpenELA's extended 4.14,
+which carries the device-cgroup BPF feature as a backport. Checked directly: that tree has
+`BPF_PROG_TYPE_CGROUP_DEVICE` and `BPF_CGROUP_DEVICE`; this one has **zero references to either**.
+His four fixes are follow-ups to a feature that is already present:
+
+| his fix | what it corrects |
+|---|---|
+| `kernel/bpf/syscall.c` | `bpf_prog_query()` is missing `BPF_CGROUP_DEVICE` from its attach-type switch - the direct cause of the `EINVAL` runc sees |
+| `kernel/bpf/verifier.c` | return-value validation for the device program type |
+| `kernel/bpf/cgroup.c` | narrow `u8`/`u16` reads of `access_type`, needed by programs LLVM 6+ emits |
+| `kernel/bpf/cgroup.c` | `sysctl_func_proto()` chained to the device helpers instead of the base set |
+
+So the work for saipan is **two** steps, not one: port the device-cgroup BPF feature from the
+OpenELA 4.14 line first, then apply his fixes on top. The surface is bounded - roughly
+`include/uapi/linux/bpf.h`, `include/linux/bpf-cgroup.h`, `kernel/bpf/cgroup.c`,
+`kernel/bpf/syscall.c`, `kernel/bpf/verifier.c`, plus the `BPF_CGROUP_RUN_PROG_DEVICE_*` call site
+in the fs layer. `security/device_cgroup.c` needs no change; in the reference tree it contains no
+BPF code at all.
+
+Worth doing, because one backport pays twice: it would move this container onto **cgroup v2 like
+every other phone in the estate**, and it would make `memory_limit` work, which on cgroup v1
+cannot be set at all ([§7.2](#72-a-container-memory-limit-is-not-available-here-either)) - and
+that is the ceiling that would have bounded the apt run that panicked the handset.
+
+The cost is a kernel rebuild and a reflash, and re-proving that the 17 vendor modules still load.
+BPF internals are not exported to them, so the risk is low - but low is not the same as verified.
+
+Until then the handset stays on cgroup v1, which is not the worse choice on its own merits: there
 the `devices` controller is a first-class kernel feature rather than a bolted-on program type.
 
 ### 2.3 The systemd socket-activation fix, inside the container
