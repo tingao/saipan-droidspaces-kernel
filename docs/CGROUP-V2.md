@@ -227,56 +227,159 @@ The `cleanup_net` warnings are confirmed pre-existing: the previous session's ca
 files already contain 6 and 3 of them respectively. My first count of `BUG:` was 1, which
 turned out to be the substring inside Trustonic's `DEBUG:` line — there are none.
 
-## 7. The limitation, and why this container stays on cgroup v1
+## 7. Why this container still stays on cgroup v1
 
-Here is the part that made the whole exercise a capability gain rather than a behaviour
-change.
+This section began as a much shorter and much wronger claim — that cgroup v2 "has no resource
+controllers at all". It does not have any *enabled*, and the precise reason, and what happens
+if you change that, turned out to be worth knowing. Everything below is measured on the handset.
 
-**This phone has no resource controllers in cgroup v2.** Android binds all ten to cgroup v1,
-and a controller can only be in one hierarchy:
+### 7.1 Where the controllers actually go, and why
 
-```
-$ cat /proc/cgroups
-cpuset    3   ...     memory    4   ...     devices  7   ...
-cpu       2   ...     blkio     1   ...     pids    10   ...
+Two independent things decide it, and neither is the kernel feature this document is about.
 
-$ cat /sys/fs/cgroup/cgroup.controllers
-                        <- empty
-```
-
-Consequently a cgroup v2 directory on this phone contains only the base files and pressure
-files. There is **no `memory.max` and no `cpu.max`**:
+**Android userspace says so.** `/system/etc/cgroups.json` names the hierarchy for each
+controller:
 
 ```
-cgroup.controllers  cgroup.events  cgroup.max.depth  cgroup.max.descendants
-cgroup.procs  cgroup.stat  cgroup.subtree_control  cgroup.threads  cgroup.type
-cpu.pressure  io.pressure  memory.pressure
+v1:  blkio -> /dev/blkio   cpu -> /dev/cpuctl   cpuset -> /dev/cpuset   memory -> /dev/memcg
+v2:  freezer
 ```
 
-They cannot be enabled either: writing `+memory` to `cgroup.subtree_control` fails, because
-`memory` is not in `cgroup.controllers`. Moving `memory` from v1 to v2 is possible in
-principle but would take `/dev/memcg` away from Android's own low-memory killer.
+So Android is not failing to use cgroup v2 — it is explicitly asking for `memory`, `cpu`,
+`cpuset` and `blkio` on v1.
 
-So on this handset:
+**And this 4.14 kernel cannot honour the one v2 request it makes.** `freezer` in cgroup v2
+arrived in **Linux 5.2**; here `freezer_cgrp_subsys` has only `.legacy_cftypes`. So init's
+request to delegate freezer in `Cgroups2` fails, `cgroup.subtree_control` stays empty, and
+`cgroup.controllers` is empty with it. That is the whole reason a v2 directory on this phone
+has only base files and pressure files.
 
-- **cgroup v2 device control works** — proven above, and that is what unblocks runc/Docker on
-  a cgroup v2 host.
-- **cgroup v2 cannot apply a memory or CPU limit** — there is no controller to write to.
+Which controllers *could* be in v2 on this kernel, read straight out of the tree:
 
-That makes moving `bagda` onto cgroup v2 a straight downgrade: the container would lose its
-90% memory cap ([container-memguard](../extras/container-memguard/)) and gain nothing, because
-the cap has nowhere to be written on v2. The container stays on cgroup v1, where the cap works
-and is proven to bind.
+| controller | v2 capable? | evidence |
+|---|---|---|
+| **memory** | **yes** | `.dfl_cftypes = memory_files` — includes `memory.max`, `memory.current`, `memory.high` |
+| **pids** | **yes** | `.dfl_cftypes = pids_files` |
+| io (blkio) | yes | `.dfl_cftypes = blkcg_files` |
+| `cpu` | no | only `.legacy_cftypes` (v2 cpu controller landed in **4.15**) |
+| `cpuset` | no | only `.legacy_cftypes` |
+| `freezer` | no | only `.legacy_cftypes` (v2 freezer landed in **5.2**) |
 
-Two things worth recording so nobody re-derives them:
+### 7.2 What actually happens if you move memory to v2
 
-- **Droidspaces contains no BPF code at all.** `strings` finds no `bpf*` symbols. Its cgroup
-  v2 support is mounting cgroup2 and writing `memory.max` / `cpu.max` / `pids.max`, and it
-  knows how to skip a controller it cannot use (`'memory' controller not supported, limit
-  skipped`). None of that needs this backport.
+This is testable without touching the system partition, because 4.14 supports the boot
+parameter **`cgroup_no_v1=`** (`__setup("cgroup_no_v1=", cgroup_no_v1)`), and we control the
+boot cmdline. With `cgroup_no_v1=memory`:
+
+- `memory` leaves v1 entirely, and `cgroup.controllers` becomes **`memory pids`**.
+- **Android tolerates it.** `cgroups.json` marks memory `"Optional": true`, init's mount of
+  `/dev/memcg` fails without complaint, and **lmkd falls back to PSI** — it logs
+  `Using psi monitors for memory pressure detection` and keeps running. `system_server`,
+  `zygote`, WebView, Wi-Fi and all 17 vendor modules came up normally, `boot_completed=1`,
+  0 panics.
+- `echo "+memory" > /sys/fs/cgroup/cgroup.subtree_control` then works, and a **direct child**
+  of the root gets `memory.max`, `memory.current`, `memory.high`, `memory.swap.max`. (Direct
+  child matters: a controller enabled at the root is only offered one level down.)
+
+And then the part that decides the question:
+
+**The cap binds, but nothing gets killed.** With `memory.max = 64 MB` and a workload
+allocating 192 MB:
+
+```
+memory.current      = 67108864    <- pinned exactly at the cap
+memory.swap.current = 0
+memory.events       = low 0 high 0 max 213311 oom 30472 oom_kill 0
+process state       = R (running), VmRSS 67892 kB
+dmesg "Memory cgroup out of memory" lines: 0
+```
+
+`memory.max` is enforced precisely — resident memory cannot exceed it. But the OOM path was
+entered **30,472 times** and `oom_kill` stayed **0**: the memcg OOM killer does not fire on
+cgroup v2 on this kernel, and the process **spins forever** at the cap instead of dying. On
+cgroup **v1** the same kernel does kill — that is proven in
+[SERVER-SETUP.md §7.2](SERVER-SETUP.md#72-a-container-memory-limit-and-why-memory_limit-is-not-how-you-get-one),
+which captured `Memory cgroup out of memory: Kill process (portainer)`.
+
+A cap that hangs the offender instead of terminating it is worse than useless for the problem
+this phone actually has, which is an `apt` run growing until the kernel panics with
+"Out of memory and no killable processes". So v2 memory is not an upgrade here.
+
+**And a memory-only cap is not a ceiling on either version.** With `memory.max = 64 MB` and
+swap left uncapped, a 192 MB allocation was absorbed rather than stopped: `memory.current`
+peaked at 63 MB while **`memory.swap.current` reached 129 MB**. This is the same lesson the v1
+guard already recorded — `memory.limit_in_bytes` alone loses to zram, and the pair that binds
+is `memory.limit_in_bytes` + `memory.memsw.limit_in_bytes`. On v2 it would be `memory.max` +
+`memory.swap.max`, and even then nothing would be killed.
+
+### 7.3 The decision
+
+- **cgroup v2 device control works** — proven in §6, and that is what unblocks runc/Docker on a
+  cgroup v2 host.
+- **cgroup v2 memory accounts and caps but does not kill** on this kernel, so it cannot replace
+  the v1 guard.
+- **cgroup v2 has no `cpu.max` or `cpuset`** on 4.14 at all.
+
+So `bagda` stays on cgroup v1, where the 90 % guard
+([container-memguard](../extras/container-memguard/)) both binds *and* kills, and where the
+`devices` controller is a first-class kernel feature rather than a bolted-on program type. The
+`cgroup_no_v1=memory` experiment was reverted; the cmdline is stock again.
+
+### 7.4 Would porting LineageOS help? No.
+
+Two separate reasons, and the first one is fatal on its own:
+
+1. **The tree in question is for a different SoC.** ravindu644's kernel is for **Exynos 9820**
+   (Galaxy S10). This phone is **MediaTek MT6833**. Kernels do not port across SoC families —
+   the display, modem, Wi-Fi/BT, touch, sensor and charger drivers are all SoC-specific, and
+   this phone's 17 vendor modules are prebuilt against Motorola's MTK kernel with matching
+   module CRCs. A foreign-SoC kernel would not boot at all. That has nothing to do with cgroups.
+   A LineageOS *for saipan* would be a different and much larger project, and the kernel would
+   still be 4.14.
+2. **Even a LineageOS 4.14 for this device would not change the outcome**, because the
+   controller placement is set by Android's `cgroups.json` (§7.1), and whether a controller
+   *can* be in v2 is a kernel-version matter. Any 4.14 lacks v2 `cpu`, `cpuset` and `freezer`.
+   OpenELA's `linux-4.14.y` and LineageOS's exynos9820 tree are both 4.14.
+
+The one thing his tree had that this one lacked — `BPF_CGROUP_DEVICE` — we now have, ported and
+proven, and the port is in this repo as a patch anyone can read.
+
+### 7.5 Two more things worth recording
+
+- **Droidspaces contains no BPF code at all.** `strings` finds no `bpf*` symbols. Its cgroup v2
+  support is mounting cgroup2 and writing `memory.max` / `cpu.max` / `pids.max`, and it knows
+  how to skip a controller it cannot use (`'memory' controller not supported, limit skipped`).
+  None of that needs this backport.
 - **`droidspaces check` reporting `[✓] Cgroup v2 support` is not evidence of this work.** That
   check only establishes that cgroup2 can be mounted; it passes on this kernel with or without
   the backport. I nearly reported it as a result.
+
+### 7.6 A note on measuring this, because I got it wrong four times
+
+Every one of the four invalid measurements below came from my own test harness, not the kernel,
+and three of them produced a confident wrong answer before being caught:
+
+1. **Sampled after the process had finished.** A completed process reads `memory.current ≈ 0`,
+   which is indistinguishable from "the cgroup never charged anything".
+2. **Suppressed `mkdir`'s error**, so the test cgroups were never created and every later write
+   failed for an unrelated reason.
+3. **Split "move into the cgroup" and "run the workload" into two shells**, so the pid written
+   to `cgroup.procs` belonged to a shell that exited immediately and the workload actually ran
+   in the root cgroup.
+4. **The workload was optimised away.** The test binary wrote each 1 MB buffer with `memset()`
+   and never read it back; at `-O2` that is a dead store and clang deleted it. The program
+   "allocated 192 MB" 192 times while its own `VmRSS` stayed at **2.6 MB**. The fix is a
+   `volatile` store plus reading a byte back, and the check that catches it is comparing the
+   process's own `VmRSS` against the cgroup's counter.
+
+The lasting lesson is the one this estate keeps re-learning: an `EINVAL`, a zero, or a
+surviving process means nothing until you have a control that rules out the boring explanation.
+The `cgdev-query` control row in §6 (a genuinely invalid attach type must still fail) exists for
+the same reason.
+
+`hog3.c`, the workload that survives optimisation, is in
+[`extras/cgroupv2-test/`](../extras/cgroupv2-test/) so the next person does not rediscover the
+dead-store trap the hard way.
 
 ## 8. Reproducing, and rolling back
 
