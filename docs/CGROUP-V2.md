@@ -227,11 +227,13 @@ The `cleanup_net` warnings are confirmed pre-existing: the previous session's ca
 files already contain 6 and 3 of them respectively. My first count of `BUG:` was 1, which
 turned out to be the substring inside Trustonic's `DEBUG:` line — there are none.
 
-## 7. Why this container still stays on cgroup v1
+## 7. Which cgroup version the container should use
 
 This section began as a much shorter and much wronger claim — that cgroup v2 "has no resource
-controllers at all". It does not have any *enabled*, and the precise reason, and what happens
-if you change that, turned out to be worth knowing. Everything below is measured on the handset.
+controllers at all" — which is why the container was kept on v1 for a reason that turned out not
+to exist. v2 has no controllers *enabled*; the precise reason why is worth knowing (§7.1), and
+the answer that came out of actually testing it is that **`bagda` now runs on cgroup v2**
+(§7.3). Everything below is measured on the handset.
 
 ### 7.1 Where the controllers actually go, and why
 
@@ -294,36 +296,80 @@ process state       = R (running), VmRSS 67892 kB
 dmesg "Memory cgroup out of memory" lines: 0
 ```
 
-`memory.max` is enforced precisely — resident memory cannot exceed it. But the OOM path was
-entered **30,472 times** and `oom_kill` stayed **0**: the memcg OOM killer does not fire on
-cgroup v2 on this kernel, and the process **spins forever** at the cap instead of dying. On
-cgroup **v1** the same kernel does kill — that is proven in
-[SERVER-SETUP.md §7.2](SERVER-SETUP.md#72-a-container-memory-limit-and-why-memory_limit-is-not-how-you-get-one),
-which captured `Memory cgroup out of memory: Kill process (portainer)`.
+`memory.max` is enforced precisely — resident memory cannot exceed it. The OOM path was entered
+**30,472 times** and `oom_kill` stayed **0**.
 
-A cap that hangs the offender instead of terminating it is worse than useless for the problem
-this phone actually has, which is an `apt` run growing until the kernel panics with
-"Out of memory and no killable processes". So v2 memory is not an upgrade here.
+**I first read that as "v2 does not kill". That was wrong, and the cause was my harness.**
+`adb shell` — and `su` — run at **`oom_score_adj = -1000`**, and the test process inherited it.
+`-1000` is `OOM_SCORE_ADJ_MIN`, which removes a task from consideration in `oom_kill()` entirely.
+So the killer ran, found no candidate, and the workload spun at the cap. Nothing about cgroup v2
+was involved.
+
+Isolated with a control — identical 64 MB **v1** cgroup, identical `hog3` workload, the score the
+only variable:
+
+| `oom_score_adj` | result |
+|---|---|
+| `0` | killed after **5 s**; `memory.oom_control: oom_kill 1`; dmesg `Memory cgroup out of memory: Kill process 19180 (hog3) score 1003 or sacrifice child` |
+| `-1000` | **alive after 30 s**; usage pinned at `67108864`, which is the limit exactly; zero kills; no dmesg line |
+
+The killer works. It was the score that stopped it. And because the same `-1000` was present in
+the earlier **v1** runs too, the v1 kill I previously cited as proof was not the kernel at all —
+it was the userspace `saipan-memguard` watchdog. I had been comparing *v1 killed by a watchdog*
+against *v2 killed by nobody* and calling the difference a property of cgroup versions.
+
+The wrong conclusion had real consequences: it is why the container was left on v1, and it hid
+the actual bug, which is that `-1000` on every container process is what panics this phone
+(§7.7).
 
 **And a memory-only cap is not a ceiling on either version.** With `memory.max = 64 MB` and
 swap left uncapped, a 192 MB allocation was absorbed rather than stopped: `memory.current`
 peaked at 63 MB while **`memory.swap.current` reached 129 MB**. This is the same lesson the v1
 guard already recorded — `memory.limit_in_bytes` alone loses to zram, and the pair that binds
-is `memory.limit_in_bytes` + `memory.memsw.limit_in_bytes`. On v2 it would be `memory.max` +
-`memory.swap.max`, and even then nothing would be killed.
+is `memory.limit_in_bytes` + `memory.memsw.limit_in_bytes`. On v2 it is `memory.max` +
+`memory.swap.max`, and with a killable process the kernel does kill.
 
-### 7.3 The decision
+### 7.3 The decision, and how it changed
 
-- **cgroup v2 device control works** — proven in §6, and that is what unblocks runc/Docker on a
-  cgroup v2 host.
-- **cgroup v2 memory accounts and caps but does not kill** on this kernel, so it cannot replace
-  the v1 guard.
-- **cgroup v2 has no `cpu.max` or `cpuset`** on 4.14 at all.
+The container is on **cgroup v2**, and the two facts that decide it are these:
 
-So `bagda` stays on cgroup v1, where the 90 % guard
-([container-memguard](../extras/container-memguard/)) both binds *and* kills, and where the
-`devices` controller is a first-class kernel feature rather than a bolted-on program type. The
-`cgroup_no_v1=memory` experiment was reverted; the cmdline is stock again.
+- **cgroup v2 device control works** — proven in §6, and now proven *in use*: querying the
+  Docker container's own cgroup returns `prog_cnt=1 attach_flags=0x2` for `BPF_CGROUP_DEVICE`,
+  i.e. runc attached a real device program and `BPF_PROG_QUERY` (the command this whole backport
+  added) reports it. The same query on the root and on the container cgroup returns 0, which is
+  the control showing the answer is not a constant.
+- **v2 gives per-container cgroup isolation, and v1 with `--force-cgroupv1` cannot.** This is
+  the part that matters. ravindu644's own Features doc says it outright — *"Cgroup isolation is
+  not available in `--force-cgroupv1` mode"* — and the effect was visible: on v1 the container's
+  systemd wrote `/init.scope` and `/system.slice/*` **at the host hierarchy root**, next to
+  Android's own cgroups, so there was no single cgroup to cap and the 90% guard covered only what
+  Docker's `cgroup-parent` happened to put inside it. On v2 every container process lands under
+  `/sys/fs/cgroup/droidspaces/bagda/…`, so one `memory.max` on that cgroup covers all of them.
+  Measured after the move: **0 of 25** container processes outside the cap.
+
+The two things that had to be arranged, both now in this repo:
+
+1. **`cgroup_no_v1=memory` on the kernel cmdline.** Without it Android keeps `memory` on v1 and
+   the v2 hierarchy has no memory controller at all, so no cap is possible. Android tolerates
+   losing `/dev/memcg` — lmkd logs `Using psi monitors for memory pressure detection` and carries
+   on. This is the one genuine trade: Android's memory killer moves from the v1 memcg to PSI.
+2. **[`extras/cgroupv2-delegate`](../extras/cgroupv2-delegate/)** — a host-side module that
+   enables `+memory` down to each container cgroup. A v2 controller is only usable in a cgroup if
+   its *parent* lists it in `cgroup.subtree_control`, and the container cannot do this for itself
+   because its cgroup namespace makes its own subtree the whole world.
+
+What did **not** change: **cgroup v2 still has no `cpu.max`, `cpuset` or `freezer`** on 4.14.
+That is a kernel-version fact, not a measurement, and it is why the container ends up hybrid —
+`memory` on v2, and `cpu`/`cpuset`/`blkio`/`schedtune` on v1 from Droidspaces' own mounts. So the
+container still has no cpu *quota*, and never will on this kernel.
+
+#### The bug that made this look impossible
+
+The reason the move did not happen the first time is in §7.2 and §7.7: every measurement ran
+with `oom_score_adj = -1000`, which removed the workload from OOM consideration entirely, so v2
+appeared to cap without killing. It never had that property. What it revealed instead was the
+real defect — `-1000` on every container process is what panicked this phone — and that is the
+thing worth carrying forward.
 
 ### 7.4 Would porting LineageOS help? No.
 
@@ -354,10 +400,10 @@ proven, and the port is in this repo as a patch anyone can read.
   check only establishes that cgroup2 can be mounted; it passes on this kernel with or without
   the backport. I nearly reported it as a result.
 
-### 7.6 A note on measuring this, because I got it wrong four times
+### 7.6 A note on measuring this, because I got it wrong five times
 
-Every one of the four invalid measurements below came from my own test harness, not the kernel,
-and three of them produced a confident wrong answer before being caught:
+Every one of the five invalid measurements below came from my own test harness, not the kernel,
+and four of them produced a confident wrong answer before being caught:
 
 1. **Sampled after the process had finished.** A completed process reads `memory.current ≈ 0`,
    which is indistinguishable from "the cgroup never charged anything".
@@ -371,15 +417,84 @@ and three of them produced a confident wrong answer before being caught:
    "allocated 192 MB" 192 times while its own `VmRSS` stayed at **2.6 MB**. The fix is a
    `volatile` store plus reading a byte back, and the check that catches it is comparing the
    process's own `VmRSS` against the cgroup's counter.
+5. **The measurement inherited an environment I never checked.** `adb shell` and `su` both run at
+   `oom_score_adj = -1000` on this device, so every workload I launched was unkillable and every
+   "the OOM killer didn't fire" result was meaningless. One `cat /proc/self/oom_score_adj` would
+   have shown it. This is the worst of the five, because the number it produced — `oom 30472
+   oom_kill 0` — was internally consistent, reproducible, and load-bearing for a design decision.
 
 The lasting lesson is the one this estate keeps re-learning: an `EINVAL`, a zero, or a
 surviving process means nothing until you have a control that rules out the boring explanation.
 The `cgdev-query` control row in §6 (a genuinely invalid attach type must still fail) exists for
-the same reason.
+the same reason, and so does the `oom_score_adj=0` row in the table in §7.2.
 
 `hog3.c`, the workload that survives optimisation, is in
 [`extras/cgroupv2-test/`](../extras/cgroupv2-test/) so the next person does not rediscover the
 dead-store trap the hard way.
+
+### 7.7 The bug this actually uncovered: `-1000` is what panics the handset
+
+Two artifacts on the device settle what was really going wrong. `dmesg-ramoops-0` (state at
+01:07) ends with:
+
+```
+Kernel panic - not syncing: Out of memory and no killable processes...
+ (7)[10025:unattended-upgr]
+```
+
+`unattended-upgrades` — apt's automatic updater, inside the container — grew until the kernel
+could find no victim, and `mm/oom_kill.c` panics unconditionally in that case:
+
+```c
+if (!oc->chosen) {
+        dump_header(oc, NULL);
+        pr_warn("Out of memory and no killable processes...\n");
+        if (!is_sysrq_oom(oc) && !is_memcg_oom(oc))
+                panic("Out of memory and no killable processes...\n");
+}
+```
+
+`panic_on_oom` is **0** here, so this was not a tunable being ignored — it is the kernel's last
+resort, and the only way to avoid it is to leave the killer a candidate. The dump shows why there
+was none: **every task in it carries `oom_score_adj = -1000`**, `systemd`, `sshd`, `cloudflared`,
+`unattended-upgr` and `[ds-monitor]` alike. `-1000` is `OOM_SCORE_ADJ_MIN`, i.e. not a candidate
+at all.
+
+That is Droidspaces' own doing, deliberately — `src/utils.c`:
+
+```c
+/* Set oom_score_adj to -1000 (unkillable).  Best-effort, no error return. */
+void ds_oom_protect(void) { ... fprintf(f, "-1000\n"); }
+```
+
+and every process in the container inherits it. The instinct — do not let Android reap my
+container — has a fatal interaction with a kernel OOM.
+
+The second half of the bug was mine. The 90 % guard was **only covering Docker**, because the only
+thing that put a workload into `/saipan-guard` was `daemon.json`:
+
+```json
+"cgroup-parent": "/saipan-guard"
+```
+
+Everything systemd started sat in `/system.slice/*` with
+
+```
+memory.limit_in_bytes = 9223372036854771712     (unlimited)
+oom_score_adj         = -1000                    (unkillable)
+```
+
+Measured before the fix: of 25 container processes, exactly **1** (`portainer`) was inside the cap;
+`saipan-guard/cgroup.procs` was empty and its usage was 70 MB.
+
+**The fix**, both halves, is in [container-memguard](../extras/container-memguard/): a `sweep`
+mode that every 10 s walks the container's PID namespace, moves anything outside `/saipan-guard`
+into it so the cap actually binds, and resets `oom_score_adj` to 0 so the kernel has a victim.
+Measured after: **25 of 25** container processes inside the guard, all at `adj = 0`,
+`outside count: 0`.
+
+Sizing is unchanged at 90 % of RAM and 90 % of RAM+swap. What changed is who the cap covers and
+whether the kernel is allowed to act on it.
 
 ## 8. Reproducing, and rolling back
 
@@ -396,3 +511,81 @@ KSRC=... OUT=... TC=... ./build/build-ksu-level.sh
 
 Full rollback is one flash either way. Do **not** relock the bootloader on this device — that
 programs an efuse and is irreversible.
+
+## 9. The configuration that is actually running
+
+Verified after an unattended reboot, with no manual steps:
+
+| | |
+|---|---|
+| kernel | `4.14.186+`, `Image.gz` 14034593 bytes, md5 `9cd8140067b2a0e8348e4b39e6a2e8c7` |
+| cmdline | `bootopt=64S3,32N2,64N2 buildvariant=user cgroup_no_v1=memory` |
+| v1 controllers still mounted | `blkio`, `cpu` (`/dev/cpuctl`), `cpuset`, `schedtune` |
+| v1 memory | **absent** by design — `memory` is on v2 |
+| v2 | `/sys/fs/cgroup` with `memory` delegated to `/sys/fs/cgroup/droidspaces/<name>` |
+| container | `bagda` on cgroup v2, `force_cgroupv1=0`, Debian 13, systemd `running`, 0 failed units |
+| cap | `memory.max = 3457220608`, `memory.swap.max = 2592911360` |
+| coverage | **0 of 25** container processes outside `/droidspaces/bagda` |
+| `oom_score_adj` | 0 on every container process except the two `[ds-monitor]` helpers |
+| `BPF_CGROUP_DEVICE` | attached by runc on the Docker scope: `prog_cnt=1 attach_flags=0x2` |
+| `/dev/cpuset/cpuset.cpus` | present (§10) |
+| health | 17 vendor modules, Wi-Fi up, sshd active, 0 panics, 0 `BUG:`, 0 WARNINGs |
+
+Two boot-ordering details worth keeping, because both were found by rebooting rather than by
+reasoning:
+
+* **The `once` unit must be allowed to fail.** On v2 the host delegates `+memory` a few seconds
+  *after* the container starts, so the oneshot can legitimately find no controller. Prefixing its
+  `ExecStart` with `-` keeps that from failing the unit.
+* **The watch unit must use `Wants=`, not `Requires=`.** With `Requires=`, the failed oneshot
+  took the watch loop down with it — `Dependency failed for saipan-memguard-watch.service` — and
+  the result was a container with `memory.max` still at `max` and 25 processes at `-1000`. A
+  dependency that is *convenient* rather than *necessary* must not be able to do that.
+
+## 10. The other Droidspaces patch: cgroup v1 `noprefix` names
+
+Droidspaces ships two non-GKI kernel patches. The second is not about v2 at all, and it fixed a
+real defect on this phone.
+
+Android mounts the v1 cpuset hierarchy with the `noprefix` flag:
+
+```
+none on /dev/cpuset type cgroup (rw,nosuid,nodev,noexec,relatime,cpuset,noprefix,release_agent=...)
+```
+
+With that flag the kernel names the files without the subsystem prefix, so `/dev/cpuset` exposed
+`cpus`, `mems`, `effective_cpus` and friends — and **not** `cpuset.cpus` / `cpuset.mems`. Anything
+speaking the standard cgroup v1 names (systemd, Docker, libcgroup, Droidspaces' own v1 mounts)
+gets `ENOENT`:
+
+```
+$ ls -l /dev/cpuset/cpuset.cpus
+ls: /dev/cpuset/cpuset.cpus: No such file or directory
+```
+
+Upstream makes the two spellings either/or in `cgroup_file_name()`. The patch creates the
+prefixed name as an *additional* kernfs link when `NOPREFIX` is set, so both exist and nothing
+that worked before stops working. It is applied verbatim as
+[`build/patches/ravindu-cgroup-prefix.patch`](../build/patches/ravindu-cgroup-prefix.patch);
+build step 1c applies it, and step 6 prints a `noprefix` count that reads **2** when it is in the
+image.
+
+After flashing:
+
+```
+/dev/cpuset/cpuset.cpus           -> cpus
+/dev/cpuset/cpuset.mems           -> mems
+/dev/cpuset/cpuset.effective_cpus -> effective_cpus
+```
+
+and inside the container, `/sys/fs/cgroup/cpuset/cpuset.cpus` reads `0-7` where before it did not
+exist at all.
+
+**His other patch does not apply here and is deliberately not shipped.**
+`01.fix_kernel_panic_in_xt_qtaguid.patch` removes an unsafe `dev_get_stats()` call on an inactive
+interface in `net/netfilter/xt_qtaguid.c`. This tree has no such source file, no
+`CONFIG_NETFILTER_XT_MATCH_QTAGUID`, and no qtaguid symbols in `vmlinux`; `git apply --check`
+fails with *No such file or directory*. There is nothing to fix, so nothing is patched — which is
+a different statement from "it was skipped", and the build script says so in a comment.
+
+

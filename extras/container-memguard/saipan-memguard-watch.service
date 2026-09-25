@@ -1,0 +1,27 @@
+[Unit]
+Description=Keep the container inside the saipan memory cap (cgroup v2 or v1)
+Documentation=file:///usr/local/sbin/saipan-memguard.sh
+# Wants=, not Requires=. At boot the `once` unit can legitimately find no memory
+# controller yet: on cgroup v2 the host has to delegate +memory down to
+# /sys/fs/cgroup/droidspaces/<name> first, and that can land a few seconds after
+# the container starts. Requires= turned that into a hard failure and systemd then
+# refused to start THIS unit - measured after a reboot: saipan-memguard.service
+# failed, the watch loop never ran, bagda/memory.max stayed "max", and no process
+# had its oom_score_adj reset. The loop re-applies every INTERVAL seconds, so it
+# only has to be allowed to run.
+Wants=saipan-memguard.service
+After=saipan-memguard.service docker.service
+
+[Service]
+Type=simple
+# 'watch' applies the cap and keeps oom_score_adj at a killable value. On v2 the
+# container is already one isolated subtree so there is nothing to move; on v1 it
+# also sweeps systemd's slices back into the guard cgroup.
+ExecStart=/usr/local/sbin/saipan-memguard.sh watch
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

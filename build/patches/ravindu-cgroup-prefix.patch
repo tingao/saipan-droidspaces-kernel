@@ -1,0 +1,44 @@
+Applied verbatim from Droidspaces-OSS, which ships it as one of the two non-GKI
+kernel patches every Droidspaces kernel is expected to carry:
+
+  Documentation/resources/kernel-patches/non-GKI/
+    02.fix_restore cgroup file prefix handling .patch
+  https://github.com/ravindu644/Droidspaces-OSS
+
+Why this device needs it
+------------------------
+Android mounts the v1 cpuset hierarchy with the `noprefix` flag. With that flag
+the kernel names the files WITHOUT the subsystem prefix, so /dev/cpuset exposes
+`cpus`, `mems`, `effective_cpus`, ... and NOT `cpuset.cpus` / `cpuset.mems`.
+Anything speaking the standard cgroup v1 names - systemd, Docker, libcgroup,
+Droidspaces - gets ENOENT.
+
+Measured on saipan before this patch:
+
+  none on /dev/cpuset type cgroup (rw,...,cpuset,noprefix,release_agent=...)
+  ls /dev/cpuset/cpuset.cpus  ->  No such file or directory
+
+Upstream makes the choice either/or in cgroup_file_name(). Droidspaces' patch
+creates the prefixed name as an ADDITIONAL kernfs link when NOPREFIX is set, so
+both spellings exist and nothing that worked before stops working.
+
+The sibling patch 01.fix_kernel_panic_in_xt_qtaguid.patch is NOT applied: this
+tree has no net/netfilter/xt_qtaguid.c, no CONFIG_NETFILTER_XT_MATCH_QTAGUID and
+no qtaguid symbols in vmlinux. There is nothing to fix.
+
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+index 694b1cc8d..d0d04bff1 100755
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -3496,6 +3496,11 @@ static int cgroup_add_file(struct cgroup_subsys_state *css, struct cgroup *cgrp,
+ 		spin_unlock_irq(&cgroup_file_kn_lock);
+ 	}
+ 
++	if (cft->ss && (cgrp->root->flags & CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)) {
++				snprintf(name, CGROUP_FILE_NAME_MAX, "%s.%s", cft->ss->name, cft->name);
++				kernfs_create_link(cgrp->kn, name, kn);
++	}
++
+ 	return 0;
+ }
+ 

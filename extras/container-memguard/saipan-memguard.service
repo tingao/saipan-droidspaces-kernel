@@ -1,17 +1,22 @@
 [Unit]
-Description=Pre-create a hierarchical memory cgroup so Docker container caps actually bind
+Description=Pre-create the saipan-guard cgroup so container memory caps bind
 Documentation=file:///usr/local/sbin/saipan-memguard.sh
 DefaultDependencies=no
 After=sysinit.target
-# Must run before the daemon, because memory.use_hierarchy can only be set while the cgroup
-# has no children - which is only true before Docker creates any container cgroups.
-Before=docker.service docker.socket
+Before=docker.service docker.socket saipan-memguard-sweep.service
 Requires=sysinit.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/saipan-memguard.sh
+# 'once': create the cgroup and set the caps. This has to finish before dockerd
+# starts on cgroup v1, because memory.use_hierarchy=1 cannot be set on a cgroup
+# that already has children (mm/memcontrol.c returns -EBUSY), and Docker would
+# create them. The leading '-' matters: on cgroup v2 the memory controller is
+# delegated by the host a few seconds into boot, so there is a window where this
+# legitimately cannot apply anything, and failing the unit would (with a hard
+# dependency) stop the watch loop from ever running. The watch loop converges.
+ExecStart=-/usr/local/sbin/saipan-memguard.sh once
 StandardOutput=journal
 StandardError=journal
 

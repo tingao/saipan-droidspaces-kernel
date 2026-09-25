@@ -68,6 +68,20 @@ else
 fi
 
 echo
+echo "===== 1c. cgroup v1 noprefix compatibility (Droidspaces) ====="
+# Android mounts the v1 cpuset hierarchy with `noprefix`, so the kernel exposes
+# `cpus`/`mems` but NOT `cpuset.cpus`/`cpuset.mems`, and anything using the
+# standard cgroup v1 names (systemd, Docker, Droidspaces, libcgroup) gets ENOENT.
+# Droidspaces ships this fix for exactly this situation. Upstream makes the two
+# spellings either/or; this creates the prefixed one as an extra kernfs link.
+if grep -q "CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)" kernel/cgroup/cgroup.c 2>/dev/null; then
+  echo "  ravindu-cgroup-prefix.patch already applied"
+else
+  git apply "$REPO/build/patches/ravindu-cgroup-prefix.patch"
+  echo "  applied build/patches/ravindu-cgroup-prefix.patch"
+fi
+
+echo
 echo "===== 2. KernelSU-Next 4.14 integration ====="
 # KernelSU-Next needs four things it does not get for free on a 4.14 tree:
 #   fs/namespace.c + fs/internal.h      path_umount(), used by ksud to unmount
@@ -157,6 +171,9 @@ if [ $rc -eq 0 ]; then
   #   bpf_prog_query(BPF_CGROUP_DEVICE) failed: invalid argument
   echo -n "  cg_dev   : "; "$TC/gcc49/bin/aarch64-linux-android-nm" "$OUT/vmlinux" 2>/dev/null \
     | grep -c 'cg_dev_verifier_ops\|__cgroup_bpf_check_dev_permission\|bpf_prog_array_copy_to_user' || true
+  # If this is 0 the noprefix compat patch is missing and /dev/cpuset will not
+  # carry cpuset.cpus / cpuset.mems.
+  echo -n "  noprefix : "; grep -c 'CFTYPE_NO_PREFIX' kernel/cgroup/cgroup.c || true
   if [ "$WITH_LEVEL" = 1 ]; then
     echo -n "  level override present: "
     grep -c 'mtk_cpufreq.level=' drivers/misc/mediatek/base/power/cpufreq_v1/src/mach/mt6833/mtk_cpufreq_platform.c

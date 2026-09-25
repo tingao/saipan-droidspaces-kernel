@@ -1,0 +1,6 @@
+id=saipan-cgroupv2
+name=Saipan cgroup v2 memory delegation
+version=v1.0
+versionCode=100
+author=tingao
+description=Enables +memory down to each Droidspaces container cgroup so a container memory cap can exist at all.
