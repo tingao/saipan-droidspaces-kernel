@@ -19,7 +19,7 @@ is Enforcing.
 | Vendor modules | 17 of 17 load - Wi-Fi, Bluetooth, touch, fingerprint, GPS, FM, sensors |
 | Runtime | Droidspaces v6.5.5 |
 | Container | `bagda` - Debian GNU/Linux 13 (trixie), systemd as PID 1, NAT network, `172.28.205.17`, `run_at_boot=1` |
-| Inside | Docker Engine 29.8.1, `overlay2`, cgroup driver `cgroupfs`, **cgroup v1**, Compose v5.5.1 |
+| Inside | Docker Engine 29.8.1, `overlay2`, cgroup driver `systemd`, **cgroup v2**, Compose v5.5.1 |
 | Host tuning | ACC holds the pack at 55-60 % (qpnp band 75-80 % as a backstop), wakeup source `saipan-awake`, CPU ceilings, SIM-driven airplane mode - all re-asserted every 60 s |
 | SELinux | **Enforcing** - permissive only during setup |
 
@@ -117,22 +117,32 @@ and proven on the handset - image 3 of [../releases/README.md](../releases/READM
 in [CGROUP-V2.md](CGROUP-V2.md). It makes the cgroup v2 device controller work: a device program
 loads, attaches, and genuinely refuses device opens while it is attached.
 
-But it does **not** make `memory_limit` work, and no backport could. This phone's cgroup v2 has
-no resource controllers - Android binds all ten to cgroup v1, so `cgroup.controllers` is empty
-and a v2 cgroup has no `memory.max`. [CGROUP-V2.md](CGROUP-V2.md) §7. The ceiling that bounds the
-container is still the cgroup v1 guard in
-[§7.2](#72-a-container-memory-limit-and-why-memory_limit-is-not-how-you-get-one) and
-[extras/container-memguard](../extras/container-memguard/).
+**And the part I got wrong after that: it does make `memory_limit` work, once `memory` is allowed
+into v2.** I wrote here that "no backport could" fix the empty `cgroup.controllers`. That was true
+only while Android kept every controller on v1, and it does not have to: `cgroup_no_v1=memory` on
+the kernel cmdline moves `memory` to the v2 hierarchy, Android tolerates losing `/dev/memcg`
+(lmkd logs `Using psi monitors for memory pressure detection` and carries on), and then
+`/sys/fs/cgroup/droidspaces/bagda/memory.max` exists and binds. [CGROUP-V2.md](CGROUP-V2.md) §7.
+
+**The container now runs on cgroup v2**, and the reason is isolation rather than the cap. On v1
+with `--force-cgroupv1`, Droidspaces' own docs say cgroup isolation is unavailable, and the effect
+was visible: the container's systemd wrote `/init.scope` and `/system.slice/*` at the *host*
+hierarchy root, next to Android's own cgroups. That is why the v1 guard could only ever cover the
+Docker workloads its `cgroup-parent` captured, and never `apt`. On v2 every container process
+lands under `/sys/fs/cgroup/droidspaces/bagda`, so one cap covers all 25 of them. What v2 still
+cannot give on 4.14 is `cpu.max`, `cpuset` and `freezer` — kernel-version facts, not measurements,
+which is why the container ends up hybrid with `cpu`/`cpuset`/`blkio` still on v1.
+
+The ceiling is [extras/container-memguard](../extras/container-memguard/), now version-aware and
+resetting `oom_score_adj`, plus [extras/cgroupv2-delegate](../extras/cgroupv2-delegate/) on the
+host to enable `+memory` down to the container cgroup. The measured detail is in
+[§7.2](#72-a-container-memory-limit-and-why-memory_limit-is-not-how-you-get-one).
 
 The cost was a kernel rebuild and a reflash, and re-proving the vendor modules still load. They
 do: 17 of 20 loaded, Wi-Fi, Bluetooth, touch, fingerprint all up, zero kernel panics, zero real
 `BUG:` lines. The module CRCs do move (`module_layout` `0xee4b197e` -> `0xa1c56ecb`), which is
 harmless only because this tree already turns a CRC mismatch into a warning rather than a
 rejection.
-
-The handset stays on cgroup v1 - but that is now a deliberate choice rather than a workaround. On
-v1 the `devices` controller is a first-class kernel feature, and, unlike v2 on this hardware, the
-memory controller exists and the 90% cap genuinely binds.
 
 ### 2.3 The systemd socket-activation fix, inside the container
 
@@ -393,6 +403,13 @@ enables - ran `apt`/`dpkg`, and the phone has 3.7 GB with Android userspace alre
 holding most of it. The kernel's OOM killer then found nothing it was allowed to
 kill and panicked rather than returning an error.
 
+**"Allowed to kill" is the mechanism, not a figure of speech, and it is §7.3.** Every
+task in that panic dump sits at `oom_score_adj = -1000`, which makes it ineligible as
+an OOM victim at all, and `mm/oom_kill.c` panics unconditionally when a non-memcg OOM
+finds no candidate. So the missing memory limit is only half the story: a cap over
+unkillable tasks would have wedged apt at the ceiling and the panic would still have
+arrived, just later. Both halves are now fixed.
+
 Worth being precise about where the memory goes, because the obvious suspect is
 wrong:
 
@@ -421,16 +438,18 @@ restart.
 
 ### 7.2 A container memory limit, and why `memory_limit=` is not how you get one
 
-`memory_limit=` exists in `container.config`, but Droidspaces implements it by writing
-`memory.max` - a **cgroup v2** file. The container runs on cgroup v1, and this phone's cgroup v2
-has no memory controller at all, so there is no `memory.max` to write either way and that option
-does nothing here ([§2.2](#22---force-cgroupv1---bpf_cgroup_device),
-[CGROUP-V2.md](CGROUP-V2.md) §7).
+`memory_limit=` exists in `container.config`, and Droidspaces implements it by writing
+`memory.max` - a **cgroup v2** file. Since the v2 move that option now works here, because the
+container is on cgroup v2 and the memory controller is delegated down to its cgroup. It is still
+not what this setup uses: Droidspaces writes `memory.max` only, and a memory-only cap loses to
+zram (finding 3 below), so the cap actually in force is
+[`extras/container-memguard/`](../extras/container-memguard/), which sets `memory.max` **and**
+`memory.swap.max`.
 
-**That is not the same as "no memory ceiling is possible", which is what this page used to
-claim, and it was wrong.** cgroup v1 has its own memory controller and it works on this
-handset. Getting a cap that actually *binds* took four findings, all measured rather than
-assumed.
+This page used to claim there was no memory ceiling at all, which was wrong. cgroup v1 has its own
+memory controller and it works on this handset. Getting a cap that actually *binds* took four
+findings, all measured rather than assumed. They apply to either cgroup version, which is why
+they are kept - only the file names differ.
 
 **1. `memory.use_hierarchy` defaults to 0, and that disables hierarchical limits.** With it
 off, a cgroup's limit applies only to that cgroup's own charges. Measured: a child cgroup
@@ -450,14 +469,26 @@ if ((!parent_memcg || !parent_memcg->use_hierarchy) && (val == 1 || val == 0)) {
 ```
 
 `/docker` always has children the moment a container runs, and even stopping Docker and
-removing them did not help - the write was still refused with `-EBUSY`. The working approach
-is a cgroup of our own, created **before dockerd starts**, at
-`/sys/fs/cgroup/memory/saipan-guard`, selected with Docker's `cgroup-parent`. It is fresh
-every boot, so it is always childless at the moment it is configured:
+removing them did not help - the write was still refused with `-EBUSY`. On cgroup v1 the working
+approach was a cgroup of our own, created **before dockerd starts**, at
+`/sys/fs/cgroup/memory/saipan-guard`, selected with Docker's `cgroup-parent`. It is fresh every
+boot, so it is always childless at the moment it is configured:
 
 ```json
 { "cgroup-parent": "/saipan-guard" }
 ```
+
+**That setting had to go when the container moved to v2**, and not because it was untidy: on v2
+Docker selects the systemd cgroup driver, which requires a slice name, and dockerd refused to
+start at all with
+
+```
+failed to start daemon: cgroup-parent for systemd cgroup should be a valid slice named as
+"xxx.slice"
+```
+
+It is also unnecessary there. v2 gives the container a subtree of its own, so every process is
+inside the boundary by construction and there is nothing to point Docker at.
 
 **3. A memory cap alone is not a ceiling, because of zram.** A memory-only cap is satisfied by
 swapping, so the process simply carries on. Measured: a **256 MB memory cap held at 255 MB
@@ -469,21 +500,53 @@ enabled on this kernel, so that file is available.
 holds at all times, so lowering means writing memory first and raising means writing memsw
 first. A fixed order silently fails one direction - it took two attempts to notice.
 
-With those understood the guard is simple: 90% of RAM (3297 MB) as the memory cap and 90% of
-RAM+swap (5769 MB) as the combined cap, applied by
-[`extras/container-memguard/`](../extras/container-memguard/).
+With those understood the guard is simple: 90% of RAM as the memory cap and 90% of swap as the
+swap cap, applied by [`extras/container-memguard/`](../extras/container-memguard/). On cgroup v1
+that was 90% of RAM and 90% of RAM+swap as a single `memsw` figure; splitting it the same way on
+v2 keeps the combined ceiling identical.
 
-**Verified on a real container**, not just a scratch cgroup: with the guard dropped to 192 MB,
-a container trying to write 900 MB was stopped at 233 MB with `memory.failcnt` at 8082, and
-the kernel logged
+**Verified on a real container**, not just a scratch cgroup, on both cgroup versions:
 
 ```
-Memory cgroup out of memory: Kill process 26782 (portainer) score 282 or sacrifice child
+v1   guard dropped to 192 MB, container writing 900 MB
+     -> stopped at 233 MB, memory.failcnt 8082
+     -> Memory cgroup out of memory: Kill process 26782 (portainer) score 282
+
+v2   container capped at 256 MB, memory.swap.max 0, workload inside the container
+     -> oom_kill 7 -> 8, the workload stopped at 128 MB
+     -> Memory cgroup out of memory: Kill process 16592 (python3) score 613
+     -> container stayed running, portainer untouched
 ```
 
-- a **memory cgroup OOM kill**, which is the entire point. The kernel takes a container
-  process instead of taking the phone down. `system_server`, `zygote` and the framework were
-  never involved and nothing rebooted.
+Both are **memory cgroup OOM kills**, which is the entire point: the kernel takes the workload
+instead of taking the phone down. `system_server`, `zygote` and the framework were never involved
+and nothing rebooted.
+
+### 7.3 The part that was actually killing the phone
+
+The cap is not what fixed the panic. This is.
+
+`/sys/fs/pstore/dmesg-ramoops-0` shows the handset going down with
+
+```
+Kernel panic - not syncing: Out of memory and no killable processes...
+ (7)[10025:unattended-upgr]
+```
+
+and **every task in that dump carries `oom_score_adj = -1000`**. That is `OOM_SCORE_ADJ_MIN`, so
+none of them is a candidate for `oom_kill()`, and `mm/oom_kill.c` panics unconditionally when a
+non-memcg OOM finds no victim. `panic_on_oom` is 0 here, so it was never a tunable.
+
+`-1000` is Droidspaces' own doing, deliberately - `src/utils.c`, `ds_oom_protect()`: *"Set
+oom_score_adj to -1000 (unkillable)"* - and everything in the container inherits it. A cap alone
+does not save you from that: measured, a cap over unkillable tasks **wedges** the workload
+(alive after 30 s, usage pinned at exactly the limit, zero kills) and the panic still arrives
+later, from whatever is not in the cgroup.
+
+So the guard resets `oom_score_adj` to 0 on every container process and lets the cgroup cap be
+the protection instead. That, plus the isolation the v2 move bought, is what closes the hole -
+and neither is visible from `droidspaces check`, which reports every requirement green either
+way.
 
 Worth recording what an *unguarded* container does, because it explains the original panic.
 Ramping one process with no cgroup limit at all, the phone stayed up while the container
