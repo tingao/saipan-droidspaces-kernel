@@ -1,21 +1,30 @@
 # Releases
 
-Two boot images. Both reuse the stock Motorola ramdisk unmodified, and both are smaller than
-the 41,943,040-byte (40 MiB) `boot` partition.
+Three boot images, each a superset of the one before it. All three reuse the stock Motorola
+ramdisk unmodified, and all three are smaller than the 41,943,040-byte (40 MiB) `boot`
+partition.
 
 | # | file | size | md5 | hardware verified |
 |---|---|---|---|---|
 | 1 | `boot-saipan-ksu.img` | 28,549,120 | `6698b76d58dacb34669bfe29cd2646d4` | yes, flashed and validated |
-| 2 | `boot-saipan-ksu-level.img` | 28,551,168 | `7c852300024f14f5b73e2f2fa8b23fda` | yes, flashed and validated - what runs on my handset |
+| 2 | `boot-saipan-ksu-level.img` | 28,551,168 | `7c852300024f14f5b73e2f2fa8b23fda` | yes, flashed and validated |
+| 3 | `boot-saipan-ksu-cgroupv2.img` | 28,551,168 | `eb78643f05b09394d9c0037eeba54108` | yes, flashed and validated - what runs on my handset |
 
 ## Which one do I want?
 
-**Download `boot-saipan-ksu-level.img`.** Image 2 is a strict superset of image 1: it adds the
-`mtk_cpufreq.level=` cmdline override, and with no such parameter on the cmdline it behaves
-identically to image 1. Image 1 is published because it is the build that was flashed and
-validated first, and keeping it makes the history honest.
+**Download `boot-saipan-ksu-cgroupv2.img`.** Image 3 is a strict superset of the other two: it
+is image 2 plus the cgroup v2 device controller (`BPF_CGROUP_DEVICE`, backported from 4.15 -
+[docs/CGROUP-V2.md](../docs/CGROUP-V2.md)), and it differs from image 2 in the kernel only. The
+header, ramdisk and DTB are byte-identical to image 2's; the cmdline is the stock one.
 
-## What was checked on both
+One caveat worth reading before you assume it changes anything: the container still runs on
+cgroup v1 afterwards, deliberately. This phone's cgroup v2 has no resource controllers, so v2
+would give up the memory cap and gain nothing.
+
+The earlier images are published because they are the builds that were flashed and validated
+first, and keeping them makes the history honest.
+
+## What was checked on all three
 
 ```
 size                  < 41,943,040 bytes
@@ -25,10 +34,12 @@ vendor modules        == 17 of 17 load; Wi-Fi, Bluetooth, touch, fingerprint, GP
 SELinux               == Enforcing
 root                  == KernelSU-Next, su -c id -> uid=0 context=u:r:ksu:s0
 Docker in Droidspaces == Engine 29.8.1, overlay2, cgroup v1, hello-world rc=0
+cgroup v2 (image 3)   == bpf_prog_query(BPF_CGROUP_DEVICE) succeeds, and a device program
+                         attaches and enforces EPERM; kernel panics 0, real BUG: 0
 ```
 
-The `RamdiskSize` field is 14,368,137 bytes in both images and in the stock image, which is how
-you can tell the ramdisk is untouched.
+The `RamdiskSize` field is 14,368,137 bytes in all three images and in the stock image, which is
+how you can tell the ramdisk is untouched.
 
 ## Verifying before you flash
 

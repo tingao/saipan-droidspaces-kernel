@@ -4,8 +4,13 @@ Two build scripts, differing by one patch:
 
 | script | adds | produced image |
 |---|---|---|
-| `build-ksu.sh` | Droidspaces config + KernelSU-Next manual hooks + vendor-module CRC tolerance | `boot-saipan-ksu.img` |
+| `build-ksu.sh` | Droidspaces config + KernelSU-Next manual hooks + vendor-module CRC tolerance + the cgroup v2 device controller | `boot-saipan-ksu.img` |
 | `build-ksu-level.sh` | the same, plus the `mtk_cpufreq.level=` DVFS-segment override | `boot-saipan-ksu-level.img` |
+
+Both scripts also apply `patches/cgroupv2-4.14.patch`, so both now build the kernel that ships
+in image 3 of [../releases/README.md](../releases/README.md). That patch is a backport of
+`BPF_CGROUP_DEVICE` from Linux 4.15 - [../docs/CGROUP-V2.md](../docs/CGROUP-V2.md) covers why it
+was needed, what porting it took, and what it deliberately does not buy on this hardware.
 
 `prepare-config.sh` is a diagnostic: it applies the same config on its own and prints the
 full diff against the config the handset shipped with, without building.
@@ -58,12 +63,17 @@ script rewrites that one call to `__strscpy_pad()`.
 
 ## Patches
 
-Two different mechanisms, deliberately separate:
+Three different mechanisms, deliberately separate:
 
 * **`patches/ksu-next-4.14.patch`** - a real `git apply` diff. KernelSU-Next's own
   old-kernel integration edits (`path_umount`, the `selinux_cred()`/`selinux_inode()`
   indirection, `filter_count` in `struct seccomp`, and hooking `drivers/kernelsu` into the
   build). Kept as a patch because it is upstream's change, not mine.
+* **`patches/cgroupv2-4.14.patch`** - also a real `git apply` diff, and also upstream's work:
+  `ebc614f68736` and `06ef0ccb5a36` from 4.15, ported to this tree. It is 342 lines across 12
+  files, so a readable diff is the only honest way to ship it. It must be applied *before* the
+  Python patchers, and `build-ksu.sh` resets all 12 files at the start of a build so it always
+  applies to a pristine tree.
 * **The Python patchers** - `patch_module.py`, `patch_module2.py`,
   `patch_manual_hooks.py`, `patch_cpu_level.py`. Each one locates a specific anchor and
   refuses to write anything if that anchor is not found exactly once. That matters here: the
@@ -75,17 +85,18 @@ Each patcher is idempotent - running the build twice does not double-apply anyth
 
 ## What a build does
 
-1. `git checkout --` the six files this project patches and KernelSU hooks, so no stale edit
+1. `git checkout --` every file this project patches and KernelSU hooks, so no stale edit
    leaks in from a previous run.
-2. Apply `patches/ksu-next-4.14.patch` if it is not already there.
-3. Fix the `strscpy_pad` call.
-4. Run the four Python patchers.
-5. Seed `out/.config` from `saipan-stock.config` - the config the handset shipped with,
+2. Apply `patches/cgroupv2-4.14.patch`.
+3. Apply `patches/ksu-next-4.14.patch` if it is not already there.
+4. Fix the `strscpy_pad` call.
+5. Run the four Python patchers.
+6. Seed `out/.config` from `saipan-stock.config` - the config the handset shipped with,
    pulled off the device with `zcat /proc/config.gz`. That is the base deliberately: every
    option this project does not mean to change stays exactly as Motorola set it.
-6. Turn on the Droidspaces options and KernelSU, turn off `SYSVIPC`.
-7. Assert the result, and abort if anything is missing.
-8. Build `Image`, check the vermagic, gzip it.
+7. Turn on the Droidspaces options and KernelSU, turn off `SYSVIPC`.
+8. Assert the result, and abort if anything is missing.
+9. Build `Image`, check the vermagic, gzip it.
 
 ```sh
 ./build-ksu-level.sh

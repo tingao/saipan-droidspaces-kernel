@@ -55,16 +55,19 @@ bpf_prog_query(BPF_CGROUP_DEVICE) failed: invalid argument
 ```
 
 The default container gets **cgroup v2**, and on v2 runc *must* program device rules with BPF.
-4.14 has no `BPF_CGROUP_DEVICE` prog-query support. Forcing cgroup v1 puts runc on the legacy
-devices cgroup, which this kernel does support.
+This tree has no `BPF_PROG_QUERY` command at all - the command arrived in 4.15 - so runc's query
+was answered `EINVAL`. Forcing cgroup v1 puts runc on the legacy devices cgroup, which this
+kernel does support. **The kernel now implements the missing feature**: see the corrections
+below, and [CGROUP-V2.md](CGROUP-V2.md) for the whole story.
 
 Droidspaces' docs recommend `cgroupfs` plus the `vfs` storage driver for legacy kernels.
 `cgroupfs` was necessary; `vfs` was not - `overlay2` works here, and the base image's own
 docker had already proven it.
 
-**Could this be avoided by staying on cgroup v2?** No, and it is worth recording that this was
-tested rather than assumed, because it is the obvious question and the estate's own GKI notes
-say the opposite for newer kernels ("do not use `--force-cgroupv1`; stay on cgroup v2").
+**Could this be avoided by staying on cgroup v2?** Not with the kernel as it then was. It is
+worth recording that this was tested rather than assumed, because it is the obvious question and
+the estate's own GKI notes say the opposite for newer kernels ("do not use `--force-cgroupv1`;
+stay on cgroup v2").
 
 The test: `force_cgroupv1=0` was set, the container came up cleanly, and `/sys/fs/cgroup` was
 `cgroup2fs`. With Docker 29.8.1 and **runc 1.5.1**, `docker run --rm hello-world` still failed
@@ -86,35 +89,50 @@ reaches it.
 [Kernels-by-ravindu644/samsung_kernel_exynos9820_extremerom@98d18e2](https://github.com/Kernels-by-ravindu644/samsung_kernel_exynos9820_extremerom/commit/98d18e2a7ec198d695e0b1a12f30c3bb76384cd7).
 
 That commit does **not** drop into this tree, and the reason is worth understanding rather than
-just trying it. His kernel reports itself as `4.14.356-openela-rc1` - OpenELA's extended 4.14,
-which carries the device-cgroup BPF feature as a backport. Checked directly: that tree has
-`BPF_PROG_TYPE_CGROUP_DEVICE` and `BPF_CGROUP_DEVICE`; this one has **zero references to either**.
-His four fixes are follow-ups to a feature that is already present:
+just trying it. He describes his kernel as a 4.14.356 tree that already has the feature, and it
+does. **Corrected:** I first wrote that this was OpenELA's extended 4.14. It is not - I cloned
+OpenELA's `linux-4.14.y` and it is at 4.14.357 with **no** `BPF_CGROUP_DEVICE` at all, still
+using the pre-4.15 attach API (`struct bpf_prog *prog[]`, `disallow_override[]`,
+`__cgroup_bpf_update`). His tree is LineageOS `android_kernel_samsung_exynos9820`, backported far
+beyond 4.15. The conclusion held either way - his commit is a follow-up to a feature already
+present - but the place to port *from* is upstream 4.15, not OpenELA.
 
 | his fix | what it corrects |
 |---|---|
-| `kernel/bpf/syscall.c` | `bpf_prog_query()` is missing `BPF_CGROUP_DEVICE` from its attach-type switch - the direct cause of the `EINVAL` runc sees |
+| `kernel/bpf/syscall.c` | `bpf_prog_query()` must accept `BPF_CGROUP_DEVICE` - **corrected below: there was no `bpf_prog_query()` here at all** |
 | `kernel/bpf/verifier.c` | return-value validation for the device program type |
 | `kernel/bpf/cgroup.c` | narrow `u8`/`u16` reads of `access_type`, needed by programs LLVM 6+ emits |
 | `kernel/bpf/cgroup.c` | `sysctl_func_proto()` chained to the device helpers instead of the base set |
 
-So the work for saipan is **two** steps, not one: port the device-cgroup BPF feature from the
-OpenELA 4.14 line first, then apply his fixes on top. The surface is bounded - roughly
-`include/uapi/linux/bpf.h`, `include/linux/bpf-cgroup.h`, `kernel/bpf/cgroup.c`,
-`kernel/bpf/syscall.c`, `kernel/bpf/verifier.c`, plus the `BPF_CGROUP_RUN_PROG_DEVICE_*` call site
-in the fs layer. `security/device_cgroup.c` needs no change; in the reference tree it contains no
-BPF code at all.
+So the work for saipan is **two** steps, not one: port the device-cgroup BPF feature first, then
+apply his fixes on top. **Two corrections to this paragraph:** the place to port from is upstream
+**4.15**, and the surface is bigger than the file list here - the command itself, its
+`union bpf_attr.query` ABI, `check_return_code()` and two `bpf_prog_array_*()` helpers were all
+missing too. And `security/device_cgroup.c` **does** need a change: the call site has to be
+added, because this tree has no `devcgroup_check_permission()` for upstream's header wrapper to
+sit in. The real port is 342 lines across 12 files.
 
-Worth doing, because one backport pays twice: it would move this container onto **cgroup v2 like
-every other phone in the estate**, and it would make `memory_limit` work, which on cgroup v1
-cannot be set at all ([§7.2](#72-a-container-memory-limit-is-not-available-here-either)) - and
-that is the ceiling that would have bounded the apt run that panicked the handset.
+**Corrected: this was done, and it does not pay twice.** The feature was ported, built, flashed
+and proven on the handset - image 3 of [../releases/README.md](../releases/README.md), full story
+in [CGROUP-V2.md](CGROUP-V2.md). It makes the cgroup v2 device controller work: a device program
+loads, attaches, and genuinely refuses device opens while it is attached.
 
-The cost is a kernel rebuild and a reflash, and re-proving that the 17 vendor modules still load.
-BPF internals are not exported to them, so the risk is low - but low is not the same as verified.
+But it does **not** make `memory_limit` work, and no backport could. This phone's cgroup v2 has
+no resource controllers - Android binds all ten to cgroup v1, so `cgroup.controllers` is empty
+and a v2 cgroup has no `memory.max`. [CGROUP-V2.md](CGROUP-V2.md) §7. The ceiling that bounds the
+container is still the cgroup v1 guard in
+[§7.2](#72-a-container-memory-limit-and-why-memory_limit-is-not-how-you-get-one) and
+[extras/container-memguard](../extras/container-memguard/).
 
-Until then the handset stays on cgroup v1, which is not the worse choice on its own merits: there
-the `devices` controller is a first-class kernel feature rather than a bolted-on program type.
+The cost was a kernel rebuild and a reflash, and re-proving the vendor modules still load. They
+do: 17 of 20 loaded, Wi-Fi, Bluetooth, touch, fingerprint all up, zero kernel panics, zero real
+`BUG:` lines. The module CRCs do move (`module_layout` `0xee4b197e` -> `0xa1c56ecb`), which is
+harmless only because this tree already turns a CRC mismatch into a warning rather than a
+rejection.
+
+The handset stays on cgroup v1 - but that is now a deliberate choice rather than a workaround. On
+v1 the `devices` controller is a first-class kernel feature, and, unlike v2 on this hardware, the
+memory controller exists and the 90% cap genuinely binds.
 
 ### 2.3 The systemd socket-activation fix, inside the container
 
@@ -404,9 +422,10 @@ restart.
 ### 7.2 A container memory limit, and why `memory_limit=` is not how you get one
 
 `memory_limit=` exists in `container.config`, but Droidspaces implements it by writing
-`memory.max` - a **cgroup v2** file. Forced onto cgroup v1 by the missing
-`BPF_CGROUP_DEVICE` ([§2.2](#22---force-cgroupv1---bpf_cgroup_device)), there is no
-`memory.max` to write, so that option does nothing here.
+`memory.max` - a **cgroup v2** file. The container runs on cgroup v1, and this phone's cgroup v2
+has no memory controller at all, so there is no `memory.max` to write either way and that option
+does nothing here ([§2.2](#22---force-cgroupv1---bpf_cgroup_device),
+[CGROUP-V2.md](CGROUP-V2.md) §7).
 
 **That is not the same as "no memory ceiling is possible", which is what this page used to
 claim, and it was wrong.** cgroup v1 has its own memory controller and it works on this

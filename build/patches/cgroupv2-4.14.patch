@@ -1,0 +1,596 @@
+diff --git a/include/linux/bpf-cgroup.h b/include/linux/bpf-cgroup.h
+index 540c44fab..941df2cff 100644
+--- a/include/linux/bpf-cgroup.h
++++ b/include/linux/bpf-cgroup.h
+@@ -45,12 +45,16 @@ int __cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
+ 			enum bpf_attach_type type, u32 flags);
+ int __cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
+ 			enum bpf_attach_type type, u32 flags);
++int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
++		       union bpf_attr __user *uattr);
+ 
+ /* Wrapper for __cgroup_bpf_*() protected by cgroup_mutex */
+ int cgroup_bpf_attach(struct cgroup *cgrp, struct bpf_prog *prog,
+ 		      enum bpf_attach_type type, u32 flags);
+ int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
+ 		      enum bpf_attach_type type, u32 flags);
++int cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
++		     union bpf_attr __user *uattr);
+ 
+ int __cgroup_bpf_run_filter_skb(struct sock *sk,
+ 				struct sk_buff *skb,
+@@ -63,6 +67,9 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
+ 				     struct bpf_sock_ops_kern *sock_ops,
+ 				     enum bpf_attach_type type);
+ 
++int __cgroup_bpf_check_dev_permission(short dev_type, u32 major, u32 minor,
++				      short access, enum bpf_attach_type type);
++
+ /* Wrappers for __cgroup_bpf_run_filter_skb() guarded by cgroup_bpf_enabled. */
+ #define BPF_CGROUP_RUN_PROG_INET_INGRESS(sk, skb)			      \
+ ({									      \
+@@ -108,6 +115,16 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
+ 	}								       \
+ 	__ret;								       \
+ })
++
++#define BPF_CGROUP_RUN_PROG_DEVICE_CGROUP(type, major, minor, access) \
++({ \
++	int __ret = 0; \
++	if (cgroup_bpf_enabled) \
++		__ret = __cgroup_bpf_check_dev_permission(type, major, minor, \
++							  access, \
++							  BPF_CGROUP_DEVICE); \
++	__ret; \
++})
+ #else
+ 
+ struct cgroup_bpf {};
+@@ -118,6 +135,7 @@ static inline int cgroup_bpf_inherit(struct cgroup *cgrp) { return 0; }
+ #define BPF_CGROUP_RUN_PROG_INET_EGRESS(sk,skb) ({ 0; })
+ #define BPF_CGROUP_RUN_PROG_INET_SOCK(sk) ({ 0; })
+ #define BPF_CGROUP_RUN_PROG_SOCK_OPS(sock_ops) ({ 0; })
++#define BPF_CGROUP_RUN_PROG_DEVICE_CGROUP(type,major,minor,access) ({ 0; })
+ 
+ #endif /* CONFIG_CGROUP_BPF */
+ 
+diff --git a/include/linux/bpf.h b/include/linux/bpf.h
+index 56e877211..03962b7b2 100644
+--- a/include/linux/bpf.h
++++ b/include/linux/bpf.h
+@@ -281,6 +281,9 @@ int bpf_prog_array_copy(struct bpf_prog_array __rcu *old_array,
+ 			struct bpf_prog *exclude_prog,
+ 			struct bpf_prog *include_prog,
+ 			struct bpf_prog_array **new_array);
++int bpf_prog_array_length(struct bpf_prog_array __rcu *progs);
++int bpf_prog_array_copy_to_user(struct bpf_prog_array __rcu *progs,
++				__u32 __user *prog_ids, u32 cnt);
+ 
+ #define __BPF_PROG_RUN_ARRAY(array, ctx, func, check_non_null)	\
+ 	({						\
+diff --git a/include/linux/bpf_types.h b/include/linux/bpf_types.h
+index e1149327a..e9fe677ca 100644
+--- a/include/linux/bpf_types.h
++++ b/include/linux/bpf_types.h
+@@ -20,6 +20,10 @@ BPF_PROG_TYPE(BPF_PROG_TYPE_TRACEPOINT, tracepoint_prog_ops)
+ BPF_PROG_TYPE(BPF_PROG_TYPE_PERF_EVENT, perf_event_prog_ops)
+ #endif
+ 
++#ifdef CONFIG_CGROUP_BPF
++BPF_PROG_TYPE(BPF_PROG_TYPE_CGROUP_DEVICE, cg_dev_verifier_ops)
++#endif
++
+ BPF_MAP_TYPE(BPF_MAP_TYPE_ARRAY, array_map_ops)
+ BPF_MAP_TYPE(BPF_MAP_TYPE_PERCPU_ARRAY, percpu_array_map_ops)
+ BPF_MAP_TYPE(BPF_MAP_TYPE_PROG_ARRAY, prog_array_map_ops)
+diff --git a/include/linux/device_cgroup.h b/include/linux/device_cgroup.h
+index cdbc344a9..e3dccd8e5 100644
+--- a/include/linux/device_cgroup.h
++++ b/include/linux/device_cgroup.h
+@@ -1,5 +1,6 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+ #include <linux/fs.h>
++#include <linux/bpf-cgroup.h>
+ 
+ #ifdef CONFIG_CGROUP_DEVICE
+ extern int __devcgroup_inode_permission(struct inode *inode, int mask);
+diff --git a/include/uapi/linux/bpf.h b/include/uapi/linux/bpf.h
+index 3dd49ee01..d73ca19c6 100644
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -93,6 +93,7 @@ enum bpf_cmd {
+ 	BPF_PROG_GET_FD_BY_ID,
+ 	BPF_MAP_GET_FD_BY_ID,
+ 	BPF_OBJ_GET_INFO_BY_FD,
++	BPF_PROG_QUERY,
+ };
+ 
+ enum bpf_map_type {
+@@ -130,6 +131,7 @@ enum bpf_prog_type {
+ 	BPF_PROG_TYPE_LWT_XMIT,
+ 	BPF_PROG_TYPE_SOCK_OPS,
+ 	BPF_PROG_TYPE_SK_SKB,
++	BPF_PROG_TYPE_CGROUP_DEVICE,
+ };
+ 
+ enum bpf_attach_type {
+@@ -139,6 +141,7 @@ enum bpf_attach_type {
+ 	BPF_CGROUP_SOCK_OPS,
+ 	BPF_SK_SKB_STREAM_PARSER,
+ 	BPF_SK_SKB_STREAM_VERDICT,
++	BPF_CGROUP_DEVICE,
+ 	__MAX_BPF_ATTACH_TYPE
+ };
+ 
+@@ -212,6 +215,9 @@ enum bpf_attach_type {
+ /* Specify numa node during map creation */
+ #define BPF_F_NUMA_NODE		(1U << 2)
+ 
++/* flags for BPF_PROG_QUERY */
++#define BPF_F_QUERY_EFFECTIVE	(1U << 0)
++
+ /* Flags for accessing BPF object */
+ #define BPF_F_RDONLY		(1U << 3)
+ #define BPF_F_WRONLY		(1U << 4)
+@@ -292,6 +298,15 @@ union bpf_attr {
+ 		__u32		info_len;
+ 		__aligned_u64	info;
+ 	} info;
++
++	struct { /* anonymous struct used by BPF_PROG_QUERY command */
++		__u32		target_fd;	/* container object to query */
++		__u32		attach_type;
++		__u32		query_flags;
++		__u32		attach_flags;
++		__aligned_u64	prog_ids;
++		__u32		prog_cnt;
++	} query;
+ } __attribute__((aligned(8)));
+ 
+ /* BPF helper function descriptions:
+@@ -906,4 +921,18 @@ enum {
+ #define TCP_BPF_IW		1001	/* Set TCP initial congestion window */
+ #define TCP_BPF_SNDCWND_CLAMP	1002	/* Set sndcwnd_clamp */
+ 
++#define BPF_DEVCG_ACC_MKNOD	(1ULL << 0)
++#define BPF_DEVCG_ACC_READ	(1ULL << 1)
++#define BPF_DEVCG_ACC_WRITE	(1ULL << 2)
++
++#define BPF_DEVCG_DEV_BLOCK	(1ULL << 0)
++#define BPF_DEVCG_DEV_CHAR	(1ULL << 1)
++
++struct bpf_cgroup_dev_ctx {
++	/* access_type encoded as (BPF_DEVCG_ACC_* << 16) | BPF_DEVCG_DEV_* */
++	__u32 access_type;
++	__u32 major;
++	__u32 minor;
++};
++
+ #endif /* _UAPI__LINUX_BPF_H__ */
+diff --git a/kernel/bpf/cgroup.c b/kernel/bpf/cgroup.c
+index 6b7500bbd..a1f8f53e1 100644
+--- a/kernel/bpf/cgroup.c
++++ b/kernel/bpf/cgroup.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include <linux/kernel.h>
++#include <linux/capability.h>
+ #include <linux/atomic.h>
+ #include <linux/cgroup.h>
+ #include <linux/slab.h>
+@@ -478,3 +479,124 @@ int __cgroup_bpf_run_filter_sock_ops(struct sock *sk,
+ 	return ret == 1 ? 0 : -EPERM;
+ }
+ EXPORT_SYMBOL(__cgroup_bpf_run_filter_sock_ops);
++
++/* Must be called with cgroup_mutex held to avoid races. */
++int __cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
++		       union bpf_attr __user *uattr)
++{
++	__u32 __user *prog_ids = u64_to_user_ptr(attr->query.prog_ids);
++	enum bpf_attach_type type = attr->query.attach_type;
++	struct list_head *progs = &cgrp->bpf.progs[type];
++	u32 flags = cgrp->bpf.flags[type];
++	int cnt, ret = 0, i;
++
++	if (attr->query.query_flags & BPF_F_QUERY_EFFECTIVE)
++		cnt = bpf_prog_array_length(cgrp->bpf.effective[type]);
++	else
++		cnt = prog_list_length(progs);
++
++	if (copy_to_user(&uattr->query.attach_flags, &flags, sizeof(flags)))
++		return -EFAULT;
++	if (copy_to_user(&uattr->query.prog_cnt, &cnt, sizeof(cnt)))
++		return -EFAULT;
++	if (attr->query.prog_cnt == 0 || !prog_ids || !cnt)
++		/* return early if user requested only program count + flags */
++		return 0;
++	if (attr->query.prog_cnt < cnt) {
++		cnt = attr->query.prog_cnt;
++		ret = -ENOSPC;
++	}
++
++	if (attr->query.query_flags & BPF_F_QUERY_EFFECTIVE) {
++		return bpf_prog_array_copy_to_user(cgrp->bpf.effective[type],
++						   prog_ids, cnt);
++	} else {
++		struct bpf_prog_list *pl;
++		u32 id;
++
++		i = 0;
++		list_for_each_entry(pl, progs, node) {
++			id = pl->prog->aux->id;
++			if (copy_to_user(prog_ids + i, &id, sizeof(id)))
++				return -EFAULT;
++			if (++i == cnt)
++				break;
++		}
++	}
++	return ret;
++}
++
++int __cgroup_bpf_check_dev_permission(short dev_type, u32 major, u32 minor,
++				      short access, enum bpf_attach_type type)
++{
++	struct cgroup *cgrp;
++	struct bpf_cgroup_dev_ctx ctx = {
++		.access_type = (access << 16) | dev_type,
++		.major = major,
++		.minor = minor,
++	};
++	int allow = 1;
++
++	rcu_read_lock();
++	cgrp = task_dfl_cgroup(current);
++	allow = BPF_PROG_RUN_ARRAY(cgrp->bpf.effective[type], &ctx,
++				   BPF_PROG_RUN);
++	rcu_read_unlock();
++
++	return !allow;
++}
++EXPORT_SYMBOL(__cgroup_bpf_check_dev_permission);
++
++static const struct bpf_func_proto *
++cgroup_dev_func_proto(enum bpf_func_id func_id)
++{
++	switch (func_id) {
++	case BPF_FUNC_map_lookup_elem:
++		return &bpf_map_lookup_elem_proto;
++	case BPF_FUNC_map_update_elem:
++		return &bpf_map_update_elem_proto;
++	case BPF_FUNC_map_delete_elem:
++		return &bpf_map_delete_elem_proto;
++	case BPF_FUNC_get_current_uid_gid:
++		return &bpf_get_current_uid_gid_proto;
++	case BPF_FUNC_trace_printk:
++		if (capable(CAP_SYS_ADMIN))
++			return bpf_get_trace_printk_proto();
++	default:
++		return NULL;
++	}
++}
++
++static bool cgroup_dev_is_valid_access(int off, int size,
++				       enum bpf_access_type type,
++				       struct bpf_insn_access_aux *info)
++{
++	const int size_default = sizeof(__u32);
++
++	if (type == BPF_WRITE)
++		return false;
++
++	if (off < 0 || off + size > sizeof(struct bpf_cgroup_dev_ctx))
++		return false;
++	/* The verifier guarantees that size > 0. */
++	if (off % size != 0)
++		return false;
++
++	switch (off) {
++	case bpf_ctx_range(struct bpf_cgroup_dev_ctx, access_type):
++		bpf_ctx_record_field_size(info, size_default);
++		if (!bpf_ctx_narrow_access_ok(off, size, size_default))
++			return false;
++		break;
++	default:
++		if (size != size_default)
++			return false;
++	}
++
++	return true;
++}
++
++const struct bpf_verifier_ops cg_dev_verifier_ops = {
++	.get_func_proto		= cgroup_dev_func_proto,
++	.is_valid_access	= cgroup_dev_is_valid_access,
++};
+diff --git a/kernel/bpf/core.c b/kernel/bpf/core.c
+index cc8411094..94cfe6f36 100644
+--- a/kernel/bpf/core.c
++++ b/kernel/bpf/core.c
+@@ -1526,6 +1526,45 @@ void bpf_prog_array_free(struct bpf_prog_array __rcu *progs)
+ 	kfree_rcu(progs, rcu);
+ }
+ 
++int bpf_prog_array_length(struct bpf_prog_array __rcu *progs)
++{
++	struct bpf_prog **prog;
++	u32 cnt = 0;
++
++	rcu_read_lock();
++	prog = rcu_dereference(progs)->progs;
++	for (; *prog; prog++)
++		if (*prog != &dummy_bpf_prog.prog)
++			cnt++;
++	rcu_read_unlock();
++	return cnt;
++}
++
++int bpf_prog_array_copy_to_user(struct bpf_prog_array __rcu *progs,
++				__u32 __user *prog_ids, u32 cnt)
++{
++	struct bpf_prog **prog;
++	u32 i = 0, id;
++
++	rcu_read_lock();
++	prog = rcu_dereference(progs)->progs;
++	for (; *prog; prog++) {
++		id = (*prog)->aux->id;
++		if (copy_to_user(prog_ids + i, &id, sizeof(id))) {
++			rcu_read_unlock();
++			return -EFAULT;
++		}
++		if (++i == cnt) {
++			prog++;
++			break;
++		}
++	}
++	rcu_read_unlock();
++	if (*prog)
++		return -ENOSPC;
++	return 0;
++}
++
+ void bpf_prog_array_delete_safe(struct bpf_prog_array __rcu *progs,
+ 				struct bpf_prog *old_prog)
+ {
+diff --git a/kernel/bpf/syscall.c b/kernel/bpf/syscall.c
+index d346cc46c..45bc272f0 100644
+--- a/kernel/bpf/syscall.c
++++ b/kernel/bpf/syscall.c
+@@ -1272,6 +1272,9 @@ static int bpf_prog_attach(const union bpf_attr *attr)
+ 	case BPF_CGROUP_SOCK_OPS:
+ 		ptype = BPF_PROG_TYPE_SOCK_OPS;
+ 		break;
++	case BPF_CGROUP_DEVICE:
++		ptype = BPF_PROG_TYPE_CGROUP_DEVICE;
++		break;
+ 	case BPF_SK_SKB_STREAM_PARSER:
+ 	case BPF_SK_SKB_STREAM_VERDICT:
+ 		return sockmap_get_from_fd(attr, true);
+@@ -1324,6 +1327,9 @@ static int bpf_prog_detach(const union bpf_attr *attr)
+ 	case BPF_CGROUP_SOCK_OPS:
+ 		ptype = BPF_PROG_TYPE_SOCK_OPS;
+ 		break;
++	case BPF_CGROUP_DEVICE:
++		ptype = BPF_PROG_TYPE_CGROUP_DEVICE;
++		break;
+ 	case BPF_SK_SKB_STREAM_PARSER:
+ 	case BPF_SK_SKB_STREAM_VERDICT:
+ 		return sockmap_get_from_fd(attr, false);
+@@ -1348,6 +1354,39 @@ static int bpf_prog_detach(const union bpf_attr *attr)
+ 
+ #endif /* CONFIG_CGROUP_BPF */
+ 
++#define BPF_PROG_QUERY_LAST_FIELD query.prog_cnt
++
++static int bpf_prog_query(const union bpf_attr *attr,
++			  union bpf_attr __user *uattr)
++{
++	struct cgroup *cgrp;
++	int ret;
++
++	if (!capable(CAP_NET_ADMIN))
++		return -EPERM;
++	if (CHECK_ATTR(BPF_PROG_QUERY))
++		return -EINVAL;
++	if (attr->query.query_flags & ~BPF_F_QUERY_EFFECTIVE)
++		return -EINVAL;
++
++	switch (attr->query.attach_type) {
++	case BPF_CGROUP_INET_INGRESS:
++	case BPF_CGROUP_INET_EGRESS:
++	case BPF_CGROUP_INET_SOCK_CREATE:
++	case BPF_CGROUP_SOCK_OPS:
++	case BPF_CGROUP_DEVICE:
++		break;
++	default:
++		return -EINVAL;
++	}
++	cgrp = cgroup_get_from_fd(attr->query.target_fd);
++	if (IS_ERR(cgrp))
++		return PTR_ERR(cgrp);
++	ret = cgroup_bpf_query(cgrp, attr, uattr);
++	cgroup_put(cgrp);
++	return ret;
++}
++
+ #define BPF_PROG_TEST_RUN_LAST_FIELD test.duration
+ 
+ static int bpf_prog_test_run(const union bpf_attr *attr,
+@@ -1637,6 +1676,9 @@ SYSCALL_DEFINE3(bpf, int, cmd, union bpf_attr __user *, uattr, unsigned int, siz
+ 	case BPF_PROG_DETACH:
+ 		err = bpf_prog_detach(&attr);
+ 		break;
++	case BPF_PROG_QUERY:
++		err = bpf_prog_query(&attr, uattr);
++		break;
+ #endif
+ 	case BPF_PROG_TEST_RUN:
+ 		err = bpf_prog_test_run(&attr, uattr);
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index 615a2e44d..f2d0b4e1f 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -4099,6 +4099,44 @@ static int ext_analyzer_insn_hook(struct bpf_verifier_env *env,
+ 	return env->analyzer_ops->insn_hook(env, insn_idx, prev_insn_idx);
+ }
+ 
++static int check_return_code(struct bpf_verifier_env *env)
++{
++	struct bpf_reg_state *reg;
++	struct tnum range = tnum_range(0, 1);
++
++	switch (env->prog->type) {
++	case BPF_PROG_TYPE_CGROUP_SKB:
++	case BPF_PROG_TYPE_CGROUP_SOCK:
++	case BPF_PROG_TYPE_SOCK_OPS:
++	case BPF_PROG_TYPE_CGROUP_DEVICE:
++		break;
++	default:
++		return 0;
++	}
++
++	reg = cur_regs(env) + BPF_REG_0;
++	if (reg->type != SCALAR_VALUE) {
++		verbose("At program exit the register R0 is not a known value (%s)\n",
++			reg_type_str[reg->type]);
++		return -EINVAL;
++	}
++
++	if (!tnum_in(range, reg->var_off)) {
++		verbose("At program exit the register R0 ");
++		if (!tnum_is_unknown(reg->var_off)) {
++			char tn_buf[48];
++
++			tnum_strn(tn_buf, sizeof(tn_buf), reg->var_off);
++			verbose("has value %s", tn_buf);
++		} else {
++			verbose("has unknown scalar value");
++		}
++		verbose(" should have been 0 or 1\n");
++		return -EINVAL;
++	}
++	return 0;
++}
++
+ static int do_check(struct bpf_verifier_env *env)
+ {
+ 	struct bpf_verifier_state *state;
+@@ -4346,6 +4384,10 @@ static int do_check(struct bpf_verifier_env *env)
+ 					return -EACCES;
+ 				}
+ 
++				err = check_return_code(env);
++				if (err)
++					return err;
++
+ process_bpf_exit:
+ 				err = pop_stack(env, &env->prev_insn_idx, &env->insn_idx);
+ 				if (err < 0) {
+diff --git a/kernel/cgroup/cgroup.c b/kernel/cgroup/cgroup.c
+index a86b94e29..c85df845e 100644
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -5986,4 +5986,14 @@ int cgroup_bpf_detach(struct cgroup *cgrp, struct bpf_prog *prog,
+ 	mutex_unlock(&cgroup_mutex);
+ 	return ret;
+ }
++int cgroup_bpf_query(struct cgroup *cgrp, const union bpf_attr *attr,
++		     union bpf_attr __user *uattr)
++{
++	int ret;
++
++	mutex_lock(&cgroup_mutex);
++	ret = __cgroup_bpf_query(cgrp, attr, uattr);
++	mutex_unlock(&cgroup_mutex);
++	return ret;
++}
+ #endif /* CONFIG_CGROUP_BPF */
+diff --git a/security/device_cgroup.c b/security/device_cgroup.c
+index ea014df89..c76191c9c 100644
+--- a/security/device_cgroup.c
++++ b/security/device_cgroup.c
+@@ -816,6 +816,9 @@ static int __devcgroup_check_permission(short type, u32 major, u32 minor,
+ 	struct dev_cgroup *dev_cgroup;
+ 	bool rc;
+ 
++	if (BPF_CGROUP_RUN_PROG_DEVICE_CGROUP(type, major, minor, access))
++		return -EPERM;
++
+ 	rcu_read_lock();
+ 	dev_cgroup = task_devcgroup(current);
+ 	if (dev_cgroup->behavior == DEVCG_DEFAULT_ALLOW)
+diff --git a/tools/include/uapi/linux/bpf.h b/tools/include/uapi/linux/bpf.h
+index 30f2ce76b..87cd114a2 100644
+--- a/tools/include/uapi/linux/bpf.h
++++ b/tools/include/uapi/linux/bpf.h
+@@ -93,6 +93,7 @@ enum bpf_cmd {
+ 	BPF_PROG_GET_FD_BY_ID,
+ 	BPF_MAP_GET_FD_BY_ID,
+ 	BPF_OBJ_GET_INFO_BY_FD,
++	BPF_PROG_QUERY,
+ };
+ 
+ enum bpf_map_type {
+@@ -130,6 +131,7 @@ enum bpf_prog_type {
+ 	BPF_PROG_TYPE_LWT_XMIT,
+ 	BPF_PROG_TYPE_SOCK_OPS,
+ 	BPF_PROG_TYPE_SK_SKB,
++	BPF_PROG_TYPE_CGROUP_DEVICE,
+ };
+ 
+ enum bpf_attach_type {
+@@ -139,6 +141,7 @@ enum bpf_attach_type {
+ 	BPF_CGROUP_SOCK_OPS,
+ 	BPF_SK_SKB_STREAM_PARSER,
+ 	BPF_SK_SKB_STREAM_VERDICT,
++	BPF_CGROUP_DEVICE,
+ 	__MAX_BPF_ATTACH_TYPE
+ };
+ 
+@@ -176,6 +179,9 @@ enum bpf_attach_type {
+ /* Specify numa node during map creation */
+ #define BPF_F_NUMA_NODE		(1U << 2)
+ 
++/* flags for BPF_PROG_QUERY */
++#define BPF_F_QUERY_EFFECTIVE	(1U << 0)
++
+ union bpf_attr {
+ 	struct { /* anonymous struct used by BPF_MAP_CREATE command */
+ 		__u32	map_type;	/* one of enum bpf_map_type */
+@@ -250,6 +256,15 @@ union bpf_attr {
+ 		__u32		info_len;
+ 		__aligned_u64	info;
+ 	} info;
++
++	struct { /* anonymous struct used by BPF_PROG_QUERY command */
++		__u32		target_fd;	/* container object to query */
++		__u32		attach_type;
++		__u32		query_flags;
++		__u32		attach_flags;
++		__aligned_u64	prog_ids;
++		__u32		prog_cnt;
++	} query;
+ } __attribute__((aligned(8)));
+ 
+ /* BPF helper function descriptions:
+@@ -864,4 +879,18 @@ enum {
+ #define TCP_BPF_IW		1001	/* Set TCP initial congestion window */
+ #define TCP_BPF_SNDCWND_CLAMP	1002	/* Set sndcwnd_clamp */
+ 
++#define BPF_DEVCG_ACC_MKNOD	(1ULL << 0)
++#define BPF_DEVCG_ACC_READ	(1ULL << 1)
++#define BPF_DEVCG_ACC_WRITE	(1ULL << 2)
++
++#define BPF_DEVCG_DEV_BLOCK	(1ULL << 0)
++#define BPF_DEVCG_DEV_CHAR	(1ULL << 1)
++
++struct bpf_cgroup_dev_ctx {
++	/* access_type encoded as (BPF_DEVCG_ACC_* << 16) | BPF_DEVCG_DEV_* */
++	__u32 access_type;
++	__u32 major;
++	__u32 minor;
++};
++
+ #endif /* _UAPI__LINUX_BPF_H__ */

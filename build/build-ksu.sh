@@ -45,8 +45,26 @@ KARGS=(O="$OUT" ARCH=arm64 TARGET_PRODUCT="$TP"
 
 echo "===== 1. reset the files this project patches ====="
 if [ -d .git ]; then
-  git checkout -- kernel/module.c fs/exec.c fs/read_write.c fs/open.c fs/stat.c kernel/reboot.c 2>/dev/null \
+  git checkout -- \
+    kernel/module.c fs/exec.c fs/read_write.c fs/open.c fs/stat.c kernel/reboot.c \
+    include/uapi/linux/bpf.h include/linux/bpf-cgroup.h include/linux/bpf_types.h \
+    include/linux/device_cgroup.h include/linux/bpf.h security/device_cgroup.c \
+    kernel/bpf/cgroup.c kernel/bpf/core.c kernel/bpf/syscall.c kernel/bpf/verifier.c \
+    kernel/cgroup/cgroup.c tools/include/uapi/linux/bpf.h 2>/dev/null \
     && echo "  reverted to pristine" || echo "  (nothing to revert / not tracked here)"
+fi
+
+echo
+echo "===== 1b. cgroup v2 device-controller backport ====="
+# Adds BPF_PROG_TYPE_CGROUP_DEVICE and the plumbing runc needs on a cgroup v2
+# host (BPF_PROG_QUERY, check_return_code(), the bpf_prog_array helpers).
+# See docs/CGROUP-V2.md - this is upstream ebc614f68736 + 06ef0ccb5a36 ported to
+# this tree, which is neither vanilla 4.14 nor vanilla 4.15.
+if grep -q "BPF_PROG_TYPE_CGROUP_DEVICE" include/uapi/linux/bpf.h 2>/dev/null; then
+  echo "  cgroupv2-4.14.patch already applied"
+else
+  git apply "$REPO/build/patches/cgroupv2-4.14.patch"
+  echo "  applied build/patches/cgroupv2-4.14.patch"
 fi
 
 echo
@@ -134,6 +152,11 @@ if [ $rc -eq 0 ]; then
   ls -l "$OUT/arch/arm64/boot/Image"
   echo -n "  vermagic : "; grep -a -o -E "4.14.186\+ SMP preempt mod_unload( modversions)? aarch64" "$OUT/vmlinux" | head -1
   echo -n "  ksu syms : "; "$TC/gcc49/bin/aarch64-linux-android-nm" "$OUT/vmlinux" 2>/dev/null | grep -c 'ksu_' || true
+  # If this is 0 the cgroup v2 backport did not make it into the image, and
+  # Docker/runc on a cgroup v2 host will fail with
+  #   bpf_prog_query(BPF_CGROUP_DEVICE) failed: invalid argument
+  echo -n "  cg_dev   : "; "$TC/gcc49/bin/aarch64-linux-android-nm" "$OUT/vmlinux" 2>/dev/null \
+    | grep -c 'cg_dev_verifier_ops\|__cgroup_bpf_check_dev_permission\|bpf_prog_array_copy_to_user' || true
   if [ "$WITH_LEVEL" = 1 ]; then
     echo -n "  level override present: "
     grep -c 'mtk_cpufreq.level=' drivers/misc/mediatek/base/power/cpufreq_v1/src/mach/mt6833/mtk_cpufreq_platform.c

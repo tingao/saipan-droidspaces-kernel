@@ -7,17 +7,18 @@ The goal was narrow: run containers on bare-metal Android. Docker inside
 [Droidspaces](https://github.com/ravindu644/Droidspaces-OSS) works on this kernel.
 `docker run --rm hello-world` returns 0, with overlay2 and cgroup v1 live inside the container.
 
-Two images, differing by one patch:
+Three images, each a superset of the one before it:
 
 | # | image | md5 | what it adds | hardware verified |
 |---|---|---|---|---|
 | 1 | `boot-saipan-ksu.img` | `6698b76d58dacb34669bfe29cd2646d4` | Droidspaces config, KernelSU-Next root, vendor-module CRC tolerance | yes, flashed and validated |
-| 2 | `boot-saipan-ksu-level.img` | `7c852300024f14f5b73e2f2fa8b23fda` | the same, plus a cmdline-selectable CPU DVFS segment | yes, flashed and validated - this is what runs on my handset |
+| 2 | `boot-saipan-ksu-level.img` | `7c852300024f14f5b73e2f2fa8b23fda` | the same, plus a cmdline-selectable CPU DVFS segment | yes, flashed and validated |
+| 3 | `boot-saipan-ksu-cgroupv2.img` | `eb78643f05b09394d9c0037eeba54108` | the same, plus the cgroup v2 device controller (`BPF_CGROUP_DEVICE`) backported | yes, flashed and validated - this is what runs on my handset |
 
-Both are 28,549,120 and 28,551,168 bytes against a 41,943,040-byte boot partition, and both
-reuse the stock ramdisk unchanged. Image 2 is a strict superset of image 1: with no
-`mtk_cpufreq.level=` on the cmdline it behaves identically, so that is the one I published as
-the recommended download.
+They are 28,549,120 / 28,551,168 / 28,551,168 bytes against a 41,943,040-byte boot partition,
+and all three reuse the stock ramdisk unchanged. Each is a strict superset of the previous one:
+image 2 behaves identically to image 1 unless `mtk_cpufreq.level=` is on the cmdline, and image
+3 differs from image 2 only in the kernel. **Image 3 is the recommended download.**
 
 ---
 
@@ -75,6 +76,7 @@ The reasoning, and the traps that go with it, are in **[docs/KERNEL-NOTES.md](do
 | SELinux | **Enforcing** |
 | Droidspaces | v6.5.5, container `bagda`, Debian 13 trixie, systemd as PID 1 |
 | Docker inside the container | Engine 29.8.1, `overlay2`, cgroup driver `cgroupfs`, **cgroup v1**, Compose v5.5.1, `hello-world` rc=0 |
+| cgroup v2 device controller | `BPF_CGROUP_DEVICE` backported from 4.15 and proven on the handset - a device program loads, attaches, and actually refuses device opens while attached ([docs/CGROUP-V2.md](docs/CGROUP-V2.md)) |
 | Kernel release string | `4.14.186+` - byte-identical to the stock vermagic |
 
 ## Kernel details
@@ -109,9 +111,11 @@ droidspaces --name=bagda start --net=nat --hw-access --privileged=noseccomp --fo
   namespace syscalls and returns `EPERM` to dodge the 4.14 VFS deadlock. containerd's shim
   needs those syscalls, so `docker run` dies with `failed to create TTRPC connection`.
 * **`--force-cgroupv1`** - the default is cgroup v2, and on v2 runc *must* program device
-  rules with BPF. 4.14 has no `BPF_CGROUP_DEVICE` prog-query support, so it fails with
-  `bpf_prog_query(BPF_CGROUP_DEVICE) failed: invalid argument`. Forcing v1 puts runc on the
-  legacy devices cgroup, which this kernel does support.
+  rules with BPF. This tree had no `BPF_PROG_QUERY` command at all, so it failed with
+  `bpf_prog_query(BPF_CGROUP_DEVICE) failed: invalid argument`. The kernel now implements that
+  (image 3), but the container still runs on v1 on purpose: this phone's cgroup v2 has **no
+  resource controllers** - Android binds all ten to cgroup v1 - so v2 would cost the memory cap
+  and give nothing back. [docs/CGROUP-V2.md](docs/CGROUP-V2.md).
 * **A systemd drop-in inside the container.** Docker CE's unit uses `-H fd://` (socket
   activation), which failed here with `no sockets found via socket activation`. A drop-in
   replaces it with plain `-H unix:///var/run/docker.sock`.
