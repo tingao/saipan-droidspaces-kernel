@@ -271,6 +271,71 @@ build, three DVFS segments, chosen by repacking the boot image.
 
 ---
 
+## 6b. The warning that is not a fault
+
+`dmesg` does not stay clean on this kernel once Docker is running, and it is worth knowing why
+before you go hunting it:
+
+```
+WARNING: CPU: 0 PID: 19153 at fs/proc/proc_sysctl.c:1687 cleanup_net+0x334/0x574
+Workqueue: netns cleanup_net
+ sysctl_net_exit+0x38/0x40
+ cleanup_net+0x334/0x574
+```
+
+It is a network-namespace teardown warning in `sysctl_net_exit`, and **Docker causes it**: every
+container that exits tears down its netns. Measured directly - three `docker run --rm` calls
+produced exactly six new occurrences, two per run, reproducibly:
+
+```
+warnings before: 2
+warnings after : 8   (three runs)
+```
+
+Nothing comes of it. Through the same test the phone stayed up, `MemAvailable` held at ~2.19 GB,
+Docker answered, and `sshd` and `cloudflared` stayed active. It is a `WARNING`, so it taints the
+kernel and it will show up in any `panic|oops|BUG:|WARNING:` sweep - including the checks in this
+repo. Treat a nonzero count as expected on a handset that runs containers, and judge the kernel by
+`panic`/`oom`/suspend behaviour instead. A `sysctl_net_exit` warning is not evidence of a bad
+kernel build; I chased this briefly as one.
+
+It also fires during boot, before anything invokes Docker, because starting the container itself
+creates a network namespace. Three occurrences at 35 s, 38 s and 91 s on a clean reboot, all the
+same site, and no vendor module appears anywhere in the trace.
+
+---
+
+## 6c. Two ways a health check lies to you
+
+Both of these reported a failure today on a handset that was working perfectly, and both cost
+more time than the real bugs.
+
+**`droidspaces` is not on `PATH` for a `su -c` shell.** It lives in
+`/data/local/Droidspaces/bin/droidspaces`. A check that calls it bare gets
+`droidspaces: inaccessible or not found` and reports the container as down, on a device where the
+container is running fine:
+
+```sh
+su -c 'droidspaces --name=bagda run /bin/true'   # not found
+su -c '/data/local/Droidspaces/bin/droidspaces --name=bagda run /bin/true'   # works
+```
+
+A ten-minute soak recorded `container=DOWN` in all sixty samples for exactly this reason, while
+`sqlite3`, `curl` and `systemctl` calls inside that same container were working. **A soak that
+reports a component down for every single sample is describing its own bug, not a fault** - a real
+outage is rarely that uniform.
+
+**`/dev/tcp` is a bash feature and Android has no bash.** This looks like it should test a
+listening port and instead always fails:
+
+```sh
+(echo > /dev/tcp/127.0.0.1/1304) >/dev/null 2>&1 && echo up || echo down   # always "down"
+```
+
+Test a port from off-device instead, where the answer is real - `Test-NetConnection <lan-ip> 1304`
+from Windows, or `adb forward` plus a connection to the forwarded port. Both confirmed sshd was
+listening on `192.168.0.239:1304` while the on-device check insisted it was not.
+
 ## 7. Build recipe
 
 Everything above is baked into `build/build-ksu.sh`, so this is the summary rather than the
