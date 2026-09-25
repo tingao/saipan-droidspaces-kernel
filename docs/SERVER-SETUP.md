@@ -401,12 +401,76 @@ dropping page cache below 300 MB. That cannot prevent the next one, but it means
 run-up appears in `/data/local/saipan-tuning.log` instead of only in pstore after a
 restart.
 
-### 7.2 A container memory limit is not available here either
+### 7.2 A container memory limit, and why `memory_limit=` is not how you get one
 
 `memory_limit=` exists in `container.config`, but Droidspaces implements it by writing
 `memory.max` - a **cgroup v2** file. Forced onto cgroup v1 by the missing
 `BPF_CGROUP_DEVICE` ([§2.2](#22---force-cgroupv1---bpf_cgroup_device)), there is no
-`memory.max` to write.
+`memory.max` to write, so that option does nothing here.
 
-So the same 4.14 constraint costs two things at once: no cgroup v2 device control, and
-no container memory ceiling. Worth knowing before reaching for either.
+**That is not the same as "no memory ceiling is possible", which is what this page used to
+claim, and it was wrong.** cgroup v1 has its own memory controller and it works on this
+handset. Getting a cap that actually *binds* took four findings, all measured rather than
+assumed.
+
+**1. `memory.use_hierarchy` defaults to 0, and that disables hierarchical limits.** With it
+off, a cgroup's limit applies only to that cgroup's own charges. Measured: a child cgroup
+reached **1008 MB under a 256 MB parent cap with `failcnt` 0** - the parent's limit was never
+consulted. So a limit written on `/docker` constrains nothing, because containers live in
+`/docker/<id>` beneath it.
+
+**2. It can only be set on a cgroup with no children.** From `mm/memcontrol.c`:
+
+```c
+if ((!parent_memcg || !parent_memcg->use_hierarchy) && (val == 1 || val == 0)) {
+        if (!memcg_has_children(memcg))
+                memcg->use_hierarchy = val;
+        else
+                retval = -EBUSY;
+}
+```
+
+`/docker` always has children the moment a container runs, and even stopping Docker and
+removing them did not help - the write was still refused with `-EBUSY`. The working approach
+is a cgroup of our own, created **before dockerd starts**, at
+`/sys/fs/cgroup/memory/saipan-guard`, selected with Docker's `cgroup-parent`. It is fresh
+every boot, so it is always childless at the moment it is configured:
+
+```json
+{ "cgroup-parent": "/saipan-guard" }
+```
+
+**3. A memory cap alone is not a ceiling, because of zram.** A memory-only cap is satisfied by
+swapping, so the process simply carries on. Measured: a **256 MB memory cap held at 255 MB
+while a 1024 MB allocation continued happily**. The cap that bites is
+`memory.memsw.limit_in_bytes`, which bounds memory *and* swap together. Swap accounting is
+enabled on this kernel, so that file is available.
+
+**4. Order matters when writing them.** The invariant `memory.limit <= memory.memsw.limit`
+holds at all times, so lowering means writing memory first and raising means writing memsw
+first. A fixed order silently fails one direction - it took two attempts to notice.
+
+With those understood the guard is simple: 90% of RAM (3297 MB) as the memory cap and 90% of
+RAM+swap (5769 MB) as the combined cap, applied by
+[`extras/container-memguard/`](../extras/container-memguard/).
+
+**Verified on a real container**, not just a scratch cgroup: with the guard dropped to 192 MB,
+a container trying to write 900 MB was stopped at 233 MB with `memory.failcnt` at 8082, and
+the kernel logged
+
+```
+Memory cgroup out of memory: Kill process 26782 (portainer) score 282 or sacrifice child
+```
+
+- a **memory cgroup OOM kill**, which is the entire point. The kernel takes a container
+  process instead of taking the phone down. `system_server`, `zygote` and the framework were
+  never involved and nothing rebooted.
+
+Worth recording what an *unguarded* container does, because it explains the original panic.
+Ramping one process with no cgroup limit at all, the phone stayed up while the container
+allocated **3840 MB - more than its 3663 MB of physical RAM** - with `MemAvailable` bottoming
+at 32 MB and swap at 2001 MB. The kernel's OOM killer never fired once; Android's own
+ActivityManager did the work, killing and restarting GMS, the launcher, the IME and
+SmsForwarder. Linux plus zram will **thrash rather than fail fast**, which is why a ceiling has
+to be imposed rather than hoped for. The practical budget before Android is squeezed below
+1 GB free is about **1.5 GB**.

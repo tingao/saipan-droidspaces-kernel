@@ -12,6 +12,7 @@ does not get you there.
 | `container-no-suspend.sh` | run **inside the container**: stops it from being able to suspend the phone |
 | `debloat-apply.sh` + `debloat-list.txt` | reversible debloat for a headless device: 111 Motorola, carrier, Google and AOSP packages, with the keep-list written down and every action logged to a rollback script |
 | `sms-telegram/` | every SMS the handset receives, forwarded to a Telegram bot. A KernelSU module on the phone plus a systemd timer in the container |
+| `container-memguard/` | a 90% memory ceiling for the Docker containers, which cgroup v1 does not give you by default |
 
 Battery charging itself is not in this directory - it is **ACC** (Advanced Charging Controller), a
 separate KernelSU module, because that is what the other two phone servers in this estate use.
