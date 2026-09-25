@@ -432,9 +432,74 @@ verified what the stock kernel prints for the same file, because that means flas
 branch-history-injection mitigation, and its meat is assembly in the entry path
 (`arch/arm64/kernel/entry.S` plus the `mitigate_spectre_bhb` macros in
 `arch/arm64/include/asm/assembler.h`), with the CPU matching in `cpu_errata.c`. Erratum 1188873
-is a `depends on ARM64_CPUCAP_WEAK_LOCAL_CPU_FEATURE` workaround in the same area. Both are
-upstream, both are backportable in principle, and both touch the path the phone takes on every
-exception - so a mistake there is a device that does not boot rather than a feature that does not
-work. That is why it is written down here as an open item with the risk stated, rather than
-quietly attempted.
+is a `depends on COMPAT` workaround in the same area. Both are upstream, both are backportable in
+principle, and both touch the path the phone takes on every exception - so a mistake there is a
+device that does not boot rather than a feature that does not work.
+
+### 9.1 How far the port actually goes, measured
+
+I assessed this properly rather than guessing, and then deliberately did **not** start it. The
+sources are available: **upstream 4.14.y has both backports**, so there is a reference
+implementation to port from rather than invent. The feasibility gate is open - our tree already
+carries `alternative_cb` support in `alternative.h`/`alternative.c` (byte-for-byte the same
+number of references as upstream 4.14.y), it already has `arm64_update_smccc_conduit` for the
+firmware variant of the macro, and `ARM_ARCH_TIMER_OOL_WORKAROUND`, which erratum 1188873
+`select`s, already exists.
+
+But the surface is much bigger than "add two Kconfig symbols":
+
+| file | ours | upstream 4.14.y |
+|---|---|---|
+| `arch/arm64/kernel/entry.S` | 1204 lines | **1254** - and structurally different |
+| `arch/arm64/kernel/cpu_errata.c` | 751 lines | **1165** |
+| `arch/arm64/include/asm/assembler.h` | 561 lines | 586 |
+
+The entry-path difference is the part that decides it. Upstream threads a per-CPU `bhb` argument
+through vector generation and has grown a `generate_el1_vector` macro that this tree does not
+have:
+
+```asm
+	.macro tramp_ventry, vector_start, regsize, kpti, bhb      # ours takes only regsize
+	...
+	generate_tramp_vector	kpti=1, bhb=BHB_MITIGATION_LOOP    # no equivalent here
+	generate_el1_vector	bhb=BHB_MITIGATION_LOOP
+```
+
+and the BHB code drags in a whole set of symbols that do not exist here at all:
+`enum mitigation_state`, `arm64_get_spectre_bhb_state()`, `spectre_bhb_enable_mitigation()`,
+`is_spectre_bhb_affected()`, `spectre_bhb_patch_loop_iter()`, `supports_clearbhb()`,
+`supports_ecbhb()`, `spectre_bhb_get_cpu_fw_mitigation_state()`, the `__spectre_bhb_loop_k8/k24/k32`
+and `__spectre_bhb_clearbhb` label pairs from `entry.S`, and the sysfs plumbing that feeds
+`cpu_show_spectre_v2()`.
+
+There is also no useful partial version. Cortex-A76 needs the **loop** variant; the `fw` variant
+needs firmware SMCCC `ARCH_WORKAROUND_3`, which MTK does not implement, and `insn` needs
+`clearbhb`. So either the loop-variant patching is ported through the exception entry path or the
+mitigation does not apply to the cores that need it.
+
+**Why I stopped rather than trying.** This is the path taken on every exception, entry.S needs
+restructuring rather than a hunk, and the failure mode of getting it nearly right is not a
+compile error - it is a device that does not boot, or one that boots and mis-patches. Starting a
+change like that with a limited budget left is how you end up handing over a tree that is neither
+the known-good state nor the finished port. The handset stays on the verified kernel in
+[../releases/](../releases/) until this is done as its own piece of work.
+
+**Turnkey starting point.** To re-pull the reference implementation (the clone is sparse, but
+`git show` serves the blobs without a checkout):
+
+```sh
+O=/root/openela-414          # openela/kernel-lts, branch linux-4.14.y, 4.14.357
+for f in arch/arm64/Kconfig arch/arm64/include/asm/assembler.h arch/arm64/kernel/entry.S \
+         arch/arm64/kernel/cpu_errata.c arch/arm64/include/asm/cpufeature.h \
+         arch/arm64/include/asm/cputype.h; do
+    git -C $O show HEAD:$f > /root/up/$(basename $f)
+done
+```
+
+Then port in this order, building after each step: Kconfig symbol, `clearbhb` +
+`__mitigate_spectre_bhb_loop`/`_fw` in `assembler.h`, `spectre_bhb_patch_loop_iter()`, the
+`midr_range` lists and `is_spectre_bhb_affected()`, `spectre_bhb_enable_mitigation()`, and last
+the `entry.S` vector restructuring. Only flash when it builds clean **and** all 17 vendor modules
+load, which is the check that catches an entry-path mistake that still links.
+
 
